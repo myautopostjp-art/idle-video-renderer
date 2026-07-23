@@ -1,0 +1,81 @@
+# =====================================================
+# 放置動画自動レンダリング ワークフロー
+# 配置場所: リポジトリの .github/workflows/render.yml
+#
+# トリガー方法:
+#  - GASから repository_dispatch (event_type: render-video) で起動
+#  - GitHub画面から手動起動(workflow_dispatch)も可能
+#
+# 必要なリポジトリ設定:
+#  - Settings > Secrets and variables > Actions に
+#    GAS_WEBHOOK_URL を登録(完成通知用、任意)
+# =====================================================
+name: Render Idle Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: '背景画像URL'
+        required: true
+      bgm_url:
+        description: 'BGM URL'
+        required: true
+      duration:
+        description: '動画の尺(秒)'
+        required: false
+        default: '3600'
+  repository_dispatch:
+    types: [render-video]
+
+permissions:
+  contents: write   # Releaseへのアップロードに必要
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Set parameters
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
+            echo "bgm_url=${{ github.event.client_payload.bgm_url }}" >> $GITHUB_OUTPUT
+            echo "duration=${{ github.event.client_payload.duration || '3600' }}" >> $GITHUB_OUTPUT
+          else
+            echo "image_url=${{ inputs.image_url }}" >> $GITHUB_OUTPUT
+            echo "bgm_url=${{ inputs.bgm_url }}" >> $GITHUB_OUTPUT
+            echo "duration=${{ inputs.duration }}" >> $GITHUB_OUTPUT
+          fi
+          echo "tag=video-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: Render video
+        run: |
+          chmod +x render.sh
+          ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4
+
+      - name: Upload to Release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.params.outputs.tag }}" output.mp4 \
+            --title "放置動画 ${{ steps.params.outputs.tag }}" \
+            --notes "自動生成された動画"
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ steps.params.outputs.tag }}/output.mp4"
+          echo "video_url=$URL" >> $GITHUB_OUTPUT
+          echo "動画URL: $URL"
+
+      - name: Notify GAS (完成通知)
+        if: ${{ vars.GAS_WEBHOOK_URL != '' }}
+        run: |
+          curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{"video_url": "${{ steps.release.outputs.video_url }}", "status": "succeeded"}' || true
