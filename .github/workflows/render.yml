@@ -76,6 +76,10 @@ jobs:
       - name: Notify GAS (完成通知)
         if: ${{ vars.GAS_WEBHOOK_URL != '' }}
         run: |
-          curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
+          echo "Webhook URL: ${{ vars.GAS_WEBHOOK_URL }}"
+          RESPONSE=$(curl -s -L --post301 --post302 --post303 -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{"video_url": "${{ steps.release.outputs.video_url }}", "status": "succeeded"}' || true
+            -d '{"video_url": "${{ steps.release.outputs.video_url }}", "status": "succeeded"}' \
+            -w "\nHTTP_STATUS:%{http_code}")
+          echo "$RESPONSE"
+          echo "$RESPONSE" | tail -c 200
