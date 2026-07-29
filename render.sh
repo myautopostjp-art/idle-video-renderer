@@ -40,11 +40,15 @@ ls -la bg.jpg
 # 日本語対応フォント(事前にrender.yml側でfonts-noto-cjkをインストールしておくこと)
 FONT="/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
+# 暖色系の文字色(黒帯ボックスは廃止し、縁取りで視認性を確保)
+TEXT_COLOR="#FFE9B3"
+BORDER_COLOR="black"
+
 # 描画フィルタ:背景 → タイマー → 上部テキスト → 下部テキスト
 VF="scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
-VF="$VF,drawtext=text='%{eif\:trunc((${DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=white:fontsize=140:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:box=1:boxcolor=black@0.4:boxborderw=44"
-VF="$VF,drawtext=textfile=${TOP_TEXT_FILE}:fontfile=${FONT}:fontcolor=white:fontsize=64:x=(w-text_w)/2:y=120:box=1:boxcolor=black@0.5:boxborderw=20:line_spacing=10"
-VF="$VF,drawtext=textfile=${BOTTOM_TEXT_FILE}:fontfile=${FONT}:fontcolor=white:fontsize=42:x=(w-text_w)/2:y=h-280:box=1:boxcolor=black@0.5:boxborderw=16:line_spacing=8"
+VF="$VF,drawtext=text='%{eif\:trunc((${DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=140:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:bordercolor=${BORDER_COLOR}:borderw=8"
+VF="$VF,drawtext=textfile=${TOP_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=64:x=(w-text_w)/2:y=120:bordercolor=${BORDER_COLOR}:borderw=5:line_spacing=10"
+VF="$VF,drawtext=textfile=${BOTTOM_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=42:x=(w-text_w)/2:y=h-280:bordercolor=${BORDER_COLOR}:borderw=4:line_spacing=8"
 
 echo "=== レンダリング開始 (${DURATION}秒 = $((DURATION/60))分, 無音=${SILENT}) ==="
 
