@@ -84,16 +84,18 @@ if [ "$USE_RAIN" = true ]; then
 fi
 
 # 光の帯(素材不要、ffmpegだけで生成する柔らかい光の帯。ゆっくり左右に揺れて「差し込み方が変わる」演出)
+# ※処理負荷対策: 低解像度(1/6)で描いてぼかしてから最後に拡大する(フル解像度で毎フレームぼかすと非常に重いため)
 LIGHT_INPUT_IDX=$((N + 1))
 if [ "$USE_RAIN" = true ]; then
   LIGHT_INPUT_IDX=$((N + 2))
 fi
-INPUTS+=(-f lavfi -t "$TOTAL_DURATION" -i "color=c=black:s=1080x1920")
+INPUTS+=(-f lavfi -t "$TOTAL_DURATION" -i "color=c=black:s=180x320")
 
 # 蛍(素材不要。数個の光の玉がそれぞれ違う速さ・軌道でゆらゆら漂う演出)
+# ※処理負荷対策: 低解像度(1/6)で描いてぼかしてから最後に拡大する
 FIREFLY_INPUT_IDX=$((LIGHT_INPUT_IDX + 1))
 if [ "$USE_FIREFLIES" = true ]; then
-  INPUTS+=(-f lavfi -t "$TOTAL_DURATION" -i "color=c=black:s=1080x1920")
+  INPUTS+=(-f lavfi -t "$TOTAL_DURATION" -i "color=c=black:s=180x320")
 fi
 
 # パーティクルは常時・screenブレンドで重ね続ける(黒は素通り、明るい粒だけ光って見える)
@@ -121,20 +123,20 @@ if [ "$USE_RAIN" = true ]; then
   PREV="rained"
 fi
 
-# 光の帯(常時。黒いキャンバスに白い帯を描いてぼかし、720秒(12分)周期で左右にゆっくり動かし、
-# screenブレンドで重ねる(黒い部分は素通り、白い帯の部分だけ明るくなる)
-FILTER="${FILTER}[${LIGHT_INPUT_IDX}:v]drawbox=x='340+300*sin(2*PI*t/720)':y=0:w=340:h=1920:color=white:t=fill,boxblur=110:1[lightsrc];"
+# 光の帯(常時。低解像度(180x320)で白い帯を描いてぼかし、1080x1920に拡大してから重ねる。
+# 720秒(12分)周期で左右にゆっくり動かし、screenブレンドで重ねる(黒い部分は素通り、白い帯の部分だけ明るくなる)
+FILTER="${FILTER}[${LIGHT_INPUT_IDX}:v]drawbox=x='57+50*sin(2*PI*t/720)':y=0:w=57:h=320:color=white:t=fill,boxblur=18:1,scale=1080:1920[lightsrc];"
 FILTER="${FILTER}[${PREV}][lightsrc]blend=all_mode=screen:all_opacity=0.4[lighted];"
 PREV="lighted"
 
-# 蛍(4つの光の玉が、それぞれ違う周期・振幅でゆっくり画面内を漂う。個々の動きがはっきり見えるように密度は少なめ)
+# 蛍(4つの光の玉が、それぞれ違う周期・振幅でゆっくり画面内を漂う。低解像度で描いてぼかしてから拡大する)
 if [ "$USE_FIREFLIES" = true ]; then
   FILTER="${FILTER}[${FIREFLY_INPUT_IDX}:v]"
-  FILTER="${FILTER}drawbox=x='200+300*sin(2*PI*t/95)':y='300+500*sin(2*PI*t/130+1)':w=50:h=50:color=white:t=fill,"
-  FILTER="${FILTER}drawbox=x='650+320*sin(2*PI*t/110+2)':y='950+550*sin(2*PI*t/150+0.5)':w=40:h=40:color=white@0.85:t=fill,"
-  FILTER="${FILTER}drawbox=x='420+260*sin(2*PI*t/85+3)':y='1450+400*sin(2*PI*t/100+2.5)':w=35:h=35:color=white@0.75:t=fill,"
-  FILTER="${FILTER}drawbox=x='800+220*sin(2*PI*t/120+1.5)':y='650+550*sin(2*PI*t/140+4)':w=45:h=45:color=white@0.7:t=fill,"
-  FILTER="${FILTER}boxblur=16:1[fireflies];"
+  FILTER="${FILTER}drawbox=x='33+50*sin(2*PI*t/95)':y='50+83*sin(2*PI*t/130+1)':w=8:h=8:color=white:t=fill,"
+  FILTER="${FILTER}drawbox=x='108+53*sin(2*PI*t/110+2)':y='158+92*sin(2*PI*t/150+0.5)':w=7:h=7:color=white@0.85:t=fill,"
+  FILTER="${FILTER}drawbox=x='70+43*sin(2*PI*t/85+3)':y='242+67*sin(2*PI*t/100+2.5)':w=6:h=6:color=white@0.75:t=fill,"
+  FILTER="${FILTER}drawbox=x='133+37*sin(2*PI*t/120+1.5)':y='108+92*sin(2*PI*t/140+4)':w=8:h=8:color=white@0.7:t=fill,"
+  FILTER="${FILTER}boxblur=3:1,scale=1080:1920[fireflies];"
   FILTER="${FILTER}[${PREV}][fireflies]blend=all_mode=screen:all_opacity=0.6[withfireflies];"
   PREV="withfireflies"
 fi
