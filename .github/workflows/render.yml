@@ -18,7 +18,7 @@ on:
         required: false
         default: '3600'
   repository_dispatch:
-    types: [render-video]
+    types: [render-video, render-video-weather]
 
 permissions:
   contents: write
@@ -38,12 +38,19 @@ jobs:
         id: params
         run: |
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
+            echo "mode=${{ github.event.action }}" >> $GITHUB_OUTPUT
             echo "bgm_url=${{ github.event.client_payload.bgm_url }}" >> $GITHUB_OUTPUT
             echo "duration=${{ github.event.client_payload.duration || '3600' }}" >> $GITHUB_OUTPUT
             echo "${{ github.event.client_payload.top_text }}" > top.txt
             echo "${{ github.event.client_payload.bottom_text }}" > bottom.txt
+
+            if [ "${{ github.event.action }}" = "render-video-weather" ]; then
+              echo '${{ toJson(github.event.client_payload.image_urls) }}' > image_urls.json
+            else
+              echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
+            fi
           else
+            echo "mode=render-video" >> $GITHUB_OUTPUT
             echo "image_url=${{ inputs.image_url }}" >> $GITHUB_OUTPUT
             echo "bgm_url=${{ inputs.bgm_url }}" >> $GITHUB_OUTPUT
             echo "duration=${{ inputs.duration }}" >> $GITHUB_OUTPUT
@@ -55,7 +62,14 @@ jobs:
       - name: Render video
         run: |
           chmod +x render.sh
-          ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4 top.txt bottom.txt
+          if [ -f render_bgm_weather.sh ]; then chmod +x render_bgm_weather.sh; fi
+
+          if [ "${{ steps.params.outputs.mode }}" = "render-video-weather" ]; then
+            IMAGE_URLS=$(jq -r '.[]' image_urls.json | tr '\n' ' ')
+            ./render_bgm_weather.sh "${{ steps.params.outputs.bgm_url }}" output.mp4 top.txt bottom.txt $IMAGE_URLS
+          else
+            ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4 top.txt bottom.txt
+          fi
 
       - name: Upload to Release
         id: release
