@@ -74,7 +74,7 @@ BORDER_COLOR="black"
 # 入力オプション組み立て(画像N枚 + BGM1つ + 雨オーバーレイ(あれば))
 INPUTS=()
 for i in "${!IMAGE_URLS[@]}"; do
-  INPUTS+=(-loop 1 -framerate 2 -t "$STAGE_SRC_SEC" -i "bg_${i}.jpg")
+  INPUTS+=(-loop 1 -framerate 6 -t "$STAGE_SRC_SEC" -i "bg_${i}.jpg")
 done
 INPUTS+=(-stream_loop -1 -i bgm.mp3)
 RAIN_INPUT_IDX=$N  # BGMの次のインデックス
@@ -152,7 +152,7 @@ ffmpeg -y "${INPUTS[@]}" \
   -filter_complex "$FILTER" \
   -map "[vout]" -map "${N}:a" \
   -t "$TOTAL_DURATION" \
-  -c:v libx264 -preset ultrafast -tune stillimage -r 2 -pix_fmt yuv420p \
+  -c:v libx264 -preset ultrafast -tune stillimage -r 6 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -shortest \
   "$OUTPUT"
 
