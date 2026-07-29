@@ -1,9 +1,13 @@
 #!/bin/bash
 # =====================================================
-# BGM版・天候変化レンダリングスクリプト(FFmpeg版)
-# 使い方: ./render_bgm_weather.sh <BGM URL> <出力ファイル名> <上部テキストファイル> <下部テキストファイル> <画像URL1> <画像URL2> ... <画像URLN>
-# 例: ./render_bgm_weather.sh "https://.../bgm.mp3" output.mp4 top.txt bottom.txt \
-#       "https://.../weather_1.png" "https://.../weather_2.png" ... "https://.../weather_6.png"
+# BGM版・天候変化レンダリングスクリプト(FFmpeg版・雨オーバーレイ対応)
+# 使い方: ./render_bgm_weather.sh <BGM URL> <出力ファイル名> <上部テキストファイル> <下部テキストファイル> \
+#           [--rain <雨オーバーレイURL or "none">] <画像URL1> <画像URL2> ... <画像URLN>
+# 例(雨オーバーレイなし): ./render_bgm_weather.sh "https://.../bgm.mp3" output.mp4 top.txt bottom.txt \
+#       "https://.../weather_1.png" ... "https://.../weather_6.png"
+# 例(雨オーバーレイあり): ./render_bgm_weather.sh "https://.../bgm.mp3" output.mp4 top.txt bottom.txt \
+#       --rain "https://.../rain_overlay.mp4" \
+#       "https://.../weather_1.png" ... "https://.../weather_6.png"
 # =====================================================
 set -e
 
@@ -12,6 +16,13 @@ OUTPUT="$2"
 TOP_TEXT_FILE="$3"
 BOTTOM_TEXT_FILE="$4"
 shift 4
+
+RAIN_URL="none"
+if [ "$1" = "--rain" ]; then
+  RAIN_URL="$2"
+  shift 2
+fi
+
 IMAGE_URLS=("$@")
 
 N=${#IMAGE_URLS[@]}
@@ -41,16 +52,52 @@ if file bgm.mp3 | grep -qi html; then
   echo "エラー: BGMのダウンロードに失敗しました(HTMLが返されました)"; exit 1
 fi
 
+USE_RAIN=false
+USE_FIREFLIES=false
+if [ "$RAIN_URL" = "synthetic-fireflies" ]; then
+  USE_FIREFLIES=true
+  echo "=== 蛍演出: ffmpegで直接生成します(外部素材不要) ==="
+elif [ "$RAIN_URL" != "none" ] && [ -n "$RAIN_URL" ]; then
+  echo "=== 雨オーバーレイ素材ダウンロード ==="
+  curl -L -o rain.mp4 "$RAIN_URL"
+  if file rain.mp4 | grep -qi html; then
+    echo "警告: 雨オーバーレイのダウンロードに失敗しました。雨演出なしで続行します"
+  else
+    USE_RAIN=true
+  fi
+fi
+
 FONT="/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 TEXT_COLOR="#FFE9B3"
 BORDER_COLOR="black"
 
-# 入力オプション組み立て(画像N枚 + BGM1つ)
+# 入力オプション組み立て(画像N枚 + BGM1つ + 雨オーバーレイ(あれば))
 INPUTS=()
 for i in "${!IMAGE_URLS[@]}"; do
   INPUTS+=(-loop 1 -framerate 2 -t "$STAGE_SRC_SEC" -i "bg_${i}.jpg")
 done
 INPUTS+=(-stream_loop -1 -i bgm.mp3)
+RAIN_INPUT_IDX=$N  # BGMの次のインデックス
+if [ "$USE_RAIN" = true ]; then
+  RAIN_INPUT_IDX=$((N + 1))
+  INPUTS+=(-stream_loop -1 -i rain.mp4)
+fi
+
+# 光の帯(素材不要、ffmpegだけで生成する柔らかい光の帯。ゆっくり左右に揺れて「差し込み方が変わる」演出)
+LIGHT_INPUT_IDX=$((N + 1))
+if [ "$USE_RAIN" = true ]; then
+  LIGHT_INPUT_IDX=$((N + 2))
+fi
+INPUTS+=(-f lavfi -t "$TOTAL_DURATION" -i "color=c=black:s=1080x1920")
+
+# 蛍(素材不要。数個の光の玉がそれぞれ違う速さ・軌道でゆらゆら漂う演出)
+FIREFLY_INPUT_IDX=$((LIGHT_INPUT_IDX + 1))
+if [ "$USE_FIREFLIES" = true ]; then
+  INPUTS+=(-f lavfi -t "$TOTAL_DURATION" -i "color=c=black:s=1080x1920")
+fi
+
+# パーティクルは常時・screenブレンドで重ね続ける(黒は素通り、明るい粒だけ光って見える)
+PARTICLE_OPACITY=0.5
 
 # スケール・クロップ
 FILTER=""
@@ -66,6 +113,31 @@ for i in $(seq 1 $((N-1))); do
   FILTER="${FILTER}[${PREV}][v${i}]xfade=transition=fade:duration=${XFADE_SEC}:offset=${OFFSET}[${NEXT}];"
   PREV="$NEXT"
 done
+
+# パーティクルオーバーレイ合成(screenブレンドで黒背景を透過、常時・一定の薄さで重ねる)
+if [ "$USE_RAIN" = true ]; then
+  FILTER="${FILTER}[${RAIN_INPUT_IDX}:v]scale=1080:1920,boxblur=1:1[rainprep];"
+  FILTER="${FILTER}[${PREV}][rainprep]blend=all_mode=screen:all_opacity=${PARTICLE_OPACITY}[rained];"
+  PREV="rained"
+fi
+
+# 光の帯(常時。黒いキャンバスに白い帯を描いてぼかし、720秒(12分)周期で左右にゆっくり動かし、
+# screenブレンドで重ねる(黒い部分は素通り、白い帯の部分だけ明るくなる)
+FILTER="${FILTER}[${LIGHT_INPUT_IDX}:v]drawbox=x='340+300*sin(2*PI*t/720)':y=0:w=340:h=1920:color=white:t=fill,boxblur=110:1[lightsrc];"
+FILTER="${FILTER}[${PREV}][lightsrc]blend=all_mode=screen:all_opacity=0.4[lighted];"
+PREV="lighted"
+
+# 蛍(4つの光の玉が、それぞれ違う周期・振幅でゆっくり画面内を漂う。個々の動きがはっきり見えるように密度は少なめ)
+if [ "$USE_FIREFLIES" = true ]; then
+  FILTER="${FILTER}[${FIREFLY_INPUT_IDX}:v]"
+  FILTER="${FILTER}drawbox=x='200+300*sin(2*PI*t/95)':y='300+500*sin(2*PI*t/130+1)':w=50:h=50:color=white:t=fill,"
+  FILTER="${FILTER}drawbox=x='650+320*sin(2*PI*t/110+2)':y='950+550*sin(2*PI*t/150+0.5)':w=40:h=40:color=white@0.85:t=fill,"
+  FILTER="${FILTER}drawbox=x='420+260*sin(2*PI*t/85+3)':y='1450+400*sin(2*PI*t/100+2.5)':w=35:h=35:color=white@0.75:t=fill,"
+  FILTER="${FILTER}drawbox=x='800+220*sin(2*PI*t/120+1.5)':y='650+550*sin(2*PI*t/140+4)':w=45:h=45:color=white@0.7:t=fill,"
+  FILTER="${FILTER}boxblur=16:1[fireflies];"
+  FILTER="${FILTER}[${PREV}][fireflies]blend=all_mode=screen:all_opacity=0.6[withfireflies];"
+  PREV="withfireflies"
+fi
 
 # タイマー・テキストオーバーレイ(最終ノードに適用)
 FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=140:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:bordercolor=${BORDER_COLOR}:borderw=8[t1];"
