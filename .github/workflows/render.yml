@@ -1,14 +1,6 @@
 # =====================================================
 # 放置動画自動レンダリング ワークフロー
 # 配置場所: リポジトリの .github/workflows/render.yml
-#
-# トリガー方法:
-#  - GASから repository_dispatch (event_type: render-video) で起動
-#  - GitHub画面から手動起動(workflow_dispatch)も可能
-#
-# 必要なリポジトリ設定:
-#  - Settings > Secrets and variables > Actions に
-#    GAS_WEBHOOK_URL を登録(完成通知用、任意)
 # =====================================================
 name: Render Idle Video
 
@@ -29,7 +21,7 @@ on:
     types: [render-video]
 
 permissions:
-  contents: write   # Releaseへのアップロードに必要
+  contents: write
 
 jobs:
   render:
@@ -49,17 +41,21 @@ jobs:
             echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
             echo "bgm_url=${{ github.event.client_payload.bgm_url }}" >> $GITHUB_OUTPUT
             echo "duration=${{ github.event.client_payload.duration || '3600' }}" >> $GITHUB_OUTPUT
+            echo "${{ github.event.client_payload.top_text }}" > top.txt
+            echo "${{ github.event.client_payload.bottom_text }}" > bottom.txt
           else
             echo "image_url=${{ inputs.image_url }}" >> $GITHUB_OUTPUT
             echo "bgm_url=${{ inputs.bgm_url }}" >> $GITHUB_OUTPUT
             echo "duration=${{ inputs.duration }}" >> $GITHUB_OUTPUT
+            echo "" > top.txt
+            echo "" > bottom.txt
           fi
           echo "tag=video-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
 
       - name: Render video
         run: |
           chmod +x render.sh
-          ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4
+          ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4 top.txt bottom.txt
 
       - name: Upload to Release
         id: release
