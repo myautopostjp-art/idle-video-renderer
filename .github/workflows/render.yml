@@ -1,3 +1,15 @@
+# =====================================================
+# 放置動画自動レンダリング ワークフロー
+# 配置場所: リポジトリの .github/workflows/render.yml
+#
+# トリガー方法:
+#  - GASから repository_dispatch (event_type: render-video) で起動
+#  - GitHub画面から手動起動(workflow_dispatch)も可能
+#
+# 必要なリポジトリ設定:
+#  - Settings > Secrets and variables > Actions に
+#    GAS_WEBHOOK_URL を登録(完成通知用、任意)
+# =====================================================
 name: Render Idle Video
 
 on:
@@ -7,25 +19,17 @@ on:
         description: '背景画像URL'
         required: true
       bgm_url:
-        description: 'BGM URL(無音の場合は none)'
+        description: 'BGM URL'
         required: true
       duration:
         description: '動画の尺(秒)'
         required: false
         default: '3600'
-      top_text:
-        description: '上部に表示するテキスト'
-        required: false
-        default: ''
-      bottom_text:
-        description: '下部に表示するテキスト'
-        required: false
-        default: ''
   repository_dispatch:
     types: [render-video]
 
 permissions:
-  contents: write
+  contents: write   # Releaseへのアップロードに必要
 
 jobs:
   render:
@@ -35,7 +39,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg and Japanese font
+      - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
 
       - name: Set parameters
@@ -52,38 +56,26 @@ jobs:
           fi
           echo "tag=video-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
 
-      - name: Write text files
-        env:
-          TOP_TEXT: ${{ github.event.client_payload.top_text || inputs.top_text }}
-          BOTTOM_TEXT: ${{ github.event.client_payload.bottom_text || inputs.bottom_text }}
-        run: |
-          printf '%s' "$TOP_TEXT" > top.txt
-          printf '%s' "$BOTTOM_TEXT" > bottom.txt
-
       - name: Render video
         run: |
           chmod +x render.sh
-          ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4 top.txt bottom.txt
+          ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4
 
       - name: Upload to Release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.params.outputs.tag }}" output.mp4 \
+          gh release create "${{ steps.params.outputs.tag }}" output.mp4 tiktokqKDPIBl5H1NvLbGlMCi1MU6K3bKB5wb9.txt \
             --title "放置動画 ${{ steps.params.outputs.tag }}" \
             --notes "自動生成された動画"
-          URL="https://github.com/${{ github.repository }}/releases/download/${{ steps.params.outputs.tag }}/output.mp4"
+          URL="https://github.com/${{ github.repository }}/releases/latest/download/output.mp4"
           echo "video_url=$URL" >> $GITHUB_OUTPUT
           echo "動画URL: $URL"
 
       - name: Notify GAS (完成通知)
         if: ${{ vars.GAS_WEBHOOK_URL != '' }}
         run: |
-          echo "Webhook URL: ${{ vars.GAS_WEBHOOK_URL }}"
-          RESPONSE=$(curl -s -L --post301 --post302 --post303 -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
+          curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{"video_url": "${{ steps.release.outputs.video_url }}", "status": "succeeded"}' \
-            -w "\nHTTP_STATUS:%{http_code}")
-          echo "$RESPONSE"
-          echo "$RESPONSE" | tail -c 200
+            -d '{"video_url": "${{ steps.release.outputs.video_url }}", "status": "succeeded"}' || true
