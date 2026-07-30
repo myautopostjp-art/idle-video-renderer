@@ -53,18 +53,25 @@ if file bgm.mp3 | grep -qi html; then
 fi
 
 USE_RAIN=false
-USE_FIREFLIES=false
-if [ "$RAIN_URL" = "synthetic-fireflies" ]; then
-  USE_FIREFLIES=true
-  echo "=== 蛍演出: ffmpegで直接生成します(外部素材不要) ==="
-elif [ "$RAIN_URL" != "none" ] && [ -n "$RAIN_URL" ]; then
-  echo "=== 雨オーバーレイ素材ダウンロード ==="
-  curl -L -o rain.mp4 "$RAIN_URL"
-  if file rain.mp4 | grep -qi html; then
-    echo "警告: 雨オーバーレイのダウンロードに失敗しました。雨演出なしで続行します"
-  else
-    USE_RAIN=true
-  fi
+SYNTH_TYPE="none"  # fireflies / petals / leaves のいずれか、または none
+case "$RAIN_URL" in
+  synthetic-fireflies) SYNTH_TYPE="fireflies"; echo "=== 蛍演出: ffmpegで直接生成します(外部素材不要) ===" ;;
+  synthetic-petals)    SYNTH_TYPE="petals";    echo "=== 桜吹雪演出: ffmpegで直接生成します(外部素材不要) ===" ;;
+  synthetic-leaves)    SYNTH_TYPE="leaves";     echo "=== 落ち葉演出: ffmpegで直接生成します(外部素材不要) ===" ;;
+  none|"") ;;
+  *)
+    echo "=== 雨オーバーレイ素材ダウンロード ==="
+    curl -L -o rain.mp4 "$RAIN_URL"
+    if file rain.mp4 | grep -qi html; then
+      echo "警告: 雨オーバーレイのダウンロードに失敗しました。雨演出なしで続行します"
+    else
+      USE_RAIN=true
+    fi
+    ;;
+esac
+USE_SYNTH=false
+if [ "$SYNTH_TYPE" != "none" ]; then
+  USE_SYNTH=true
 fi
 
 FONT="/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
@@ -91,10 +98,9 @@ if [ "$USE_RAIN" = true ]; then
 fi
 INPUTS+=(-f lavfi -t "$TOTAL_DURATION" -i "color=c=black:s=180x320")
 
-# 蛍(素材不要。数個の光の玉がそれぞれ違う速さ・軌道でゆらゆら漂う演出)
-# ※処理負荷対策: 低解像度(1/6)で描いてぼかしてから最後に拡大する
-FIREFLY_INPUT_IDX=$((LIGHT_INPUT_IDX + 1))
-if [ "$USE_FIREFLIES" = true ]; then
+# 合成パーティクル(蛍/桜吹雪/落ち葉共通。素材不要。低解像度(1/6)で描いてぼかしてから最後に拡大する)
+SYNTH_INPUT_IDX=$((LIGHT_INPUT_IDX + 1))
+if [ "$USE_SYNTH" = true ]; then
   INPUTS+=(-f lavfi -t "$TOTAL_DURATION" -i "color=c=black:s=180x320")
 fi
 
@@ -118,27 +124,52 @@ done
 
 # パーティクルオーバーレイ合成(screenブレンドで黒背景を透過、常時・一定の薄さで重ねる)
 if [ "$USE_RAIN" = true ]; then
-  FILTER="${FILTER}[${RAIN_INPUT_IDX}:v]scale=1080:1920,boxblur=1:1[rainprep];"
-  FILTER="${FILTER}[${PREV}][rainprep]blend=all_mode=screen:all_opacity=${PARTICLE_OPACITY}[rained];"
+  FILTER="${FILTER}[${RAIN_INPUT_IDX}:v]scale=1080:1920,boxblur=1:1,format=gbrp[rainprep];"
+  FILTER="${FILTER}[${PREV}]format=gbrp[prevrgb];"
+  FILTER="${FILTER}[prevrgb][rainprep]blend=all_mode=screen:all_opacity=${PARTICLE_OPACITY}[rained];"
   PREV="rained"
 fi
 
 # 光の帯(常時。低解像度(180x320)で白い帯を描いてぼかし、1080x1920に拡大してから重ねる。
 # 720秒(12分)周期で左右にゆっくり動かし、screenブレンドで重ねる(黒い部分は素通り、白い帯の部分だけ明るくなる)
-FILTER="${FILTER}[${LIGHT_INPUT_IDX}:v]drawbox=x='57+50*sin(2*PI*t/720)':y=0:w=57:h=320:color=white:t=fill,boxblur=18:1,scale=1080:1920[lightsrc];"
-FILTER="${FILTER}[${PREV}][lightsrc]blend=all_mode=screen:all_opacity=0.4[lighted];"
+FILTER="${FILTER}[${LIGHT_INPUT_IDX}:v]drawbox=x='57+50*sin(2*PI*t/720)':y=0:w=57:h=320:color=white:t=fill,boxblur=18:1,scale=1080:1920,format=gbrp[lightsrc];"
+FILTER="${FILTER}[${PREV}]format=gbrp[prevrgb2];"
+FILTER="${FILTER}[prevrgb2][lightsrc]blend=all_mode=screen:all_opacity=0.4[lighted];"
 PREV="lighted"
 
-# 蛍(4つの光の玉が、それぞれ違う周期・振幅でゆっくり画面内を漂う。低解像度で描いてぼかしてから拡大する)
-if [ "$USE_FIREFLIES" = true ]; then
-  FILTER="${FILTER}[${FIREFLY_INPUT_IDX}:v]"
-  FILTER="${FILTER}drawbox=x='33+50*sin(2*PI*t/95)':y='50+83*sin(2*PI*t/130+1)':w=8:h=8:color=white:t=fill,"
-  FILTER="${FILTER}drawbox=x='108+53*sin(2*PI*t/110+2)':y='158+92*sin(2*PI*t/150+0.5)':w=7:h=7:color=white@0.85:t=fill,"
-  FILTER="${FILTER}drawbox=x='70+43*sin(2*PI*t/85+3)':y='242+67*sin(2*PI*t/100+2.5)':w=6:h=6:color=white@0.75:t=fill,"
-  FILTER="${FILTER}drawbox=x='133+37*sin(2*PI*t/120+1.5)':y='108+92*sin(2*PI*t/140+4)':w=8:h=8:color=white@0.7:t=fill,"
-  FILTER="${FILTER}boxblur=3:1,scale=1080:1920[fireflies];"
-  FILTER="${FILTER}[${PREV}][fireflies]blend=all_mode=screen:all_opacity=0.6[withfireflies];"
-  PREV="withfireflies"
+# 合成パーティクル(蛍/桜吹雪/落ち葉。低解像度で描いてぼかしてから拡大する)
+if [ "$USE_SYNTH" = true ]; then
+  FILTER="${FILTER}[${SYNTH_INPUT_IDX}:v]"
+  case "$SYNTH_TYPE" in
+    fireflies)
+      # 4つの光の玉が、それぞれ違う周期・振幅でゆっくり画面内を漂う
+      FILTER="${FILTER}drawbox=x='33+50*sin(2*PI*t/9)':y='50+83*sin(2*PI*t/13+1)':w=8:h=8:color=white:t=fill,"
+      FILTER="${FILTER}drawbox=x='108+53*sin(2*PI*t/11+2)':y='158+92*sin(2*PI*t/15+0.5)':w=7:h=7:color=white@0.85:t=fill,"
+      FILTER="${FILTER}drawbox=x='70+43*sin(2*PI*t/8+3)':y='242+67*sin(2*PI*t/10+2.5)':w=6:h=6:color=white@0.75:t=fill,"
+      FILTER="${FILTER}drawbox=x='133+37*sin(2*PI*t/12+1.5)':y='108+92*sin(2*PI*t/14+4)':w=8:h=8:color=white@0.7:t=fill,"
+      FILTER="${FILTER}boxblur=3:1,scale=1080:1920,format=gbrp[synth];"
+      ;;
+    petals)
+      # 5枚の花びらが、左右に揺れながらゆっくり下に落ち続ける(下まで着いたら上からループ)
+      FILTER="${FILTER}drawbox=x='30+22*sin(2*PI*t/4)':y='mod(t*22+10,340)-20':w=7:h=5:color=#FFD9E6:t=fill,"
+      FILTER="${FILTER}drawbox=x='70+18*sin(2*PI*t/3.3+1)':y='mod(t*18+90,340)-20':w=6:h=4:color=#FFC7DA@0.9:t=fill,"
+      FILTER="${FILTER}drawbox=x='110+25*sin(2*PI*t/4.6+2)':y='mod(t*26+170,340)-20':w=8:h=5:color=#FFE0EC@0.85:t=fill,"
+      FILTER="${FILTER}drawbox=x='145+16*sin(2*PI*t/3.8+3)':y='mod(t*20+250,340)-20':w=6:h=4:color=#FFC7DA@0.8:t=fill,"
+      FILTER="${FILTER}drawbox=x='20+20*sin(2*PI*t/5+4)':y='mod(t*24+300,340)-20':w=7:h=5:color=#FFD9E6@0.75:t=fill,"
+      FILTER="${FILTER}boxblur=2:1,scale=1080:1920,format=gbrp[synth];"
+      ;;
+    leaves)
+      # 4枚の落ち葉が、大きく左右に揺れながらゆっくり下に落ち続ける(下まで着いたら上からループ)
+      FILTER="${FILTER}drawbox=x='40+35*sin(2*PI*t/3)':y='mod(t*16+20,340)-20':w=9:h=6:color=#CC7A2E:t=fill,"
+      FILTER="${FILTER}drawbox=x='90+30*sin(2*PI*t/3.6+1.5)':y='mod(t*14+120,340)-20':w=8:h=6:color=#B8621F@0.9:t=fill,"
+      FILTER="${FILTER}drawbox=x='135+32*sin(2*PI*t/2.8+3)':y='mod(t*17+220,340)-20':w=9:h=6:color=#D98A3D@0.85:t=fill,"
+      FILTER="${FILTER}drawbox=x='60+28*sin(2*PI*t/3.3+4.5)':y='mod(t*15+280,340)-20':w=7:h=5:color=#C4701F@0.8:t=fill,"
+      FILTER="${FILTER}boxblur=2:1,scale=1080:1920,format=gbrp[synth];"
+      ;;
+  esac
+  FILTER="${FILTER}[${PREV}]format=gbrp[prevrgb3];"
+  FILTER="${FILTER}[prevrgb3][synth]blend=all_mode=screen:all_opacity=0.6[withsynth];"
+  PREV="withsynth"
 fi
 
 # タイマー・テキストオーバーレイ(最終ノードに適用)
