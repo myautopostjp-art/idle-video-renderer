@@ -1,0 +1,46 @@
+name: Render YouTube Loop Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: '素材動画のURL(Pexels等)'
+        required: true
+        default: 'https://videos.pexels.com/video-files/36425432/15445244_2560_1440_30fps.mp4'
+      bgm_url:
+        description: 'BGMのURL(不要な場合はnone)'
+        required: false
+        default: 'none'
+      duration_sec:
+        description: '動画の長さ(秒)。60分=3600'
+        required: false
+        default: '3600'
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Make script executable
+        run: chmod +x render_youtube_loop.sh
+
+      - name: Render video
+        run: |
+          ./render_youtube_loop.sh \
+            "${{ github.event.inputs.source_url }}" \
+            "${{ github.event.inputs.bgm_url }}" \
+            "${{ github.event.inputs.duration_sec }}" \
+            "output_youtube.mp4"
+
+      - name: Upload as release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: youtube-video-${{ github.run_number }}
+          files: output_youtube.mp4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
