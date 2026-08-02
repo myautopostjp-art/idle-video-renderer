@@ -34,6 +34,14 @@ jobs:
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
 
+      - name: Set up Python for Drive upload
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Google Drive upload dependencies
+        run: pip install google-api-python-client google-auth
+
       - name: Set parameters
         id: params
         run: |
@@ -57,7 +65,14 @@ jobs:
             echo "" > top.txt
             echo "" > bottom.txt
           fi
-          echo "tag=video-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+
+          BGM_URL_VALUE="${{ github.event.client_payload.bgm_url || inputs.bgm_url }}"
+          if [ -z "$BGM_URL_VALUE" ] || [ "$BGM_URL_VALUE" = "none" ]; then
+            LABEL="silent"
+          else
+            LABEL="bgm"
+          fi
+          echo "tag=${LABEL}_video-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
 
       - name: Render video
         run: |
@@ -86,9 +101,63 @@ jobs:
           echo "video_url=$URL" >> $GITHUB_OUTPUT
           echo "動画URL: $URL"
 
+      - name: Upload to Google Drive
+        id: drive
+        if: ${{ vars.GDRIVE_FOLDER_ID != '' }}
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+          FILE_PATH: ${{ steps.params.outputs.tag }}.mp4
+          FILE_TAG: ${{ steps.params.outputs.tag }}
+        run: |
+          cat << 'EOF' > upload_to_drive.py
+          import os
+          import json
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          creds_json = os.environ['GDRIVE_SERVICE_ACCOUNT_JSON']
+          folder_id = os.environ['GDRIVE_FOLDER_ID']
+          file_path = os.environ['FILE_PATH']
+          file_tag = os.environ['FILE_TAG']
+
+          creds_info = json.loads(creds_json)
+          creds = service_account.Credentials.from_service_account_info(
+              creds_info, scopes=['https://www.googleapis.com/auth/drive']
+          )
+          service = build('drive', 'v3', credentials=creds)
+
+          file_metadata = {
+              'name': f'{file_tag}.mp4',
+              'parents': [folder_id]
+          }
+          media = MediaFileUpload(file_path, mimetype='video/mp4', resumable=True)
+          uploaded = service.files().create(
+              body=file_metadata, media_body=media, fields='id'
+          ).execute()
+
+          file_id = uploaded.get('id')
+          service.permissions().create(
+              fileId=file_id,
+              body={'type': 'anyone', 'role': 'reader'}
+          ).execute()
+
+          drive_url = f'https://drive.google.com/uc?export=download&id={file_id}'
+          print(f'Drive URL: {drive_url}')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'drive_url={drive_url}\n')
+          EOF
+          python upload_to_drive.py
+
       - name: Notify GAS (完成通知)
         if: ${{ vars.GAS_WEBHOOK_URL != '' }}
         run: |
+          DRIVE_URL="${{ steps.drive.outputs.drive_url }}"
+          if [ -z "$DRIVE_URL" ]; then
+            DRIVE_URL="${{ steps.release.outputs.video_url }}"
+          fi
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{"video_url": "${{ steps.release.outputs.video_url }}", "status": "succeeded"}' || true
+            -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true}' || true
