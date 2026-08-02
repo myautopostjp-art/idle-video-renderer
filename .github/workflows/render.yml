@@ -71,15 +71,18 @@ jobs:
             ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4 top.txt bottom.txt
           fi
 
+      - name: Rename output with unique timestamped filename
+        run: mv output.mp4 "${{ steps.params.outputs.tag }}.mp4"
+
       - name: Upload to Release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.params.outputs.tag }}" output.mp4 tiktokqKDPIBl5H1NvLbGlMCi1MU6K3bKB5wb9.txt \
+          gh release create "${{ steps.params.outputs.tag }}" "${{ steps.params.outputs.tag }}.mp4" tiktokqKDPIBl5H1NvLbGlMCi1MU6K3bKB5wb9.txt \
             --title "放置動画 ${{ steps.params.outputs.tag }}" \
             --notes "自動生成された動画"
-          URL="https://github.com/${{ github.repository }}/releases/latest/download/output.mp4"
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ steps.params.outputs.tag }}/${{ steps.params.outputs.tag }}.mp4"
           echo "video_url=$URL" >> $GITHUB_OUTPUT
           echo "動画URL: $URL"
 
