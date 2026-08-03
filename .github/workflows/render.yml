@@ -40,7 +40,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Google Drive upload dependencies
-        run: pip install google-api-python-client google-auth
+        run: pip install google-api-python-client google-auth google-auth-oauthlib
 
       - name: Set parameters
         id: params
@@ -101,31 +101,36 @@ jobs:
           echo "video_url=$URL" >> $GITHUB_OUTPUT
           echo "動画URL: $URL"
 
-      - name: Upload to Google Drive
+      - name: Upload to Google Drive (OAuth)
         id: drive
         if: ${{ vars.GDRIVE_FOLDER_ID != '' }}
         env:
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
           FILE_PATH: ${{ steps.params.outputs.tag }}.mp4
           FILE_TAG: ${{ steps.params.outputs.tag }}
         run: |
           cat << 'EOF' > upload_to_drive.py
           import os
-          import json
-          from google.oauth2 import service_account
+          from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
-          creds_json = os.environ['GDRIVE_SERVICE_ACCOUNT_JSON']
           folder_id = os.environ['GDRIVE_FOLDER_ID']
           file_path = os.environ['FILE_PATH']
           file_tag = os.environ['FILE_TAG']
 
-          creds_info = json.loads(creds_json)
-          creds = service_account.Credentials.from_service_account_info(
-              creds_info, scopes=['https://www.googleapis.com/auth/drive']
+          creds = Credentials(
+              token=None,
+              refresh_token=os.environ['GDRIVE_REFRESH_TOKEN'],
+              client_id=os.environ['GDRIVE_CLIENT_ID'],
+              client_secret=os.environ['GDRIVE_CLIENT_SECRET'],
+              token_uri='https://oauth2.googleapis.com/token',
+              scopes=['https://www.googleapis.com/auth/drive']
           )
+
           service = build('drive', 'v3', credentials=creds)
 
           file_metadata = {
