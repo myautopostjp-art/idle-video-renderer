@@ -1,15 +1,223 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>idle-video-renderer</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Idle Video Renderer - Relaxing Video Auto-Post System</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0a0a;
+      color: #f0f0f0;
+      line-height: 1.7;
+    }
+    header {
+      background: linear-gradient(135deg, #1a1a2e, #16213e);
+      padding: 60px 20px;
+      text-align: center;
+      border-bottom: 1px solid #333;
+    }
+    header h1 {
+      font-size: 2.4rem;
+      font-weight: 700;
+      margin-bottom: 12px;
+      background: linear-gradient(90deg, #e0e0e0, #a0a0a0);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    header p {
+      font-size: 1.1rem;
+      color: #aaa;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    main {
+      max-width: 900px;
+      margin: 60px auto;
+      padding: 0 20px;
+    }
+    .section {
+      margin-bottom: 60px;
+    }
+    .section h2 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: #e0e0e0;
+      border-left: 4px solid #555;
+      padding-left: 14px;
+    }
+    .section p {
+      color: #bbb;
+      margin-bottom: 14px;
+    }
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px;
+      margin-top: 20px;
+    }
+    .feature-card {
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .feature-card h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: #ddd;
+    }
+    .feature-card p {
+      font-size: 0.9rem;
+      color: #999;
+      margin: 0;
+    }
+    .tiktok-section {
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 12px;
+      padding: 32px;
+    }
+    .tiktok-section p {
+      color: #bbb;
+      margin-bottom: 12px;
+    }
+    .tiktok-section ul {
+      list-style: none;
+      padding: 0;
+    }
+    .tiktok-section ul li {
+      padding: 8px 0;
+      color: #999;
+      border-bottom: 1px solid #1a1a1a;
+      font-size: 0.95rem;
+    }
+    .tiktok-section ul li:last-child {
+      border-bottom: none;
+    }
+    .tiktok-section ul li::before {
+      content: '✓ ';
+      color: #666;
+    }
+    footer {
+      background: #050505;
+      border-top: 1px solid #1a1a1a;
+      padding: 40px 20px;
+      text-align: center;
+    }
+    footer a {
+      color: #888;
+      text-decoration: none;
+      margin: 0 16px;
+      font-size: 0.9rem;
+      transition: color 0.2s;
+    }
+    footer a:hover {
+      color: #ddd;
+    }
+    footer p {
+      margin-top: 20px;
+      color: #555;
+      font-size: 0.85rem;
+    }
+  </style>
 </head>
 <body>
-<h1>idle-video-renderer</h1>
-<p>放置動画自動投稿システムの関連ページです。</p>
-<ul>
-<li><a href="privacy-policy.html">プライバシーポリシー</a></li>
-<li><a href="terms-of-service.html">利用規約</a></li>
-</ul>
+
+<header>
+  <h1>Idle Video Renderer</h1>
+  <p>An automated system for generating and publishing relaxing ambient videos to TikTok.</p>
+</header>
+
+<main>
+
+  <div class="section">
+    <h2>About This Application</h2>
+    <p>
+      Idle Video Renderer is a fully automated content creation and publishing system
+      designed to generate high-quality relaxing ambient videos — such as cozy room scenes,
+      fireplace ambience, and nature-inspired backgrounds — and distribute them to TikTok
+      on a scheduled basis.
+    </p>
+    <p>
+      The system uses AI-generated imagery and background music to produce unique,
+      visually calming content intended for productivity, study, and relaxation purposes.
+      All content is original and created programmatically using licensed AI generation tools.
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>Features</h2>
+    <div class="features">
+      <div class="feature-card">
+        <h3>🎨 AI Image Generation</h3>
+        <p>Unique background scenes are generated using Google Gemini's image generation API, ensuring fresh and original visuals every time.</p>
+      </div>
+      <div class="feature-card">
+        <h3>🎵 Original BGM</h3>
+        <p>Background music is composed using AI music generation tools, producing royalty-free, relaxing audio tracks.</p>
+      </div>
+      <div class="feature-card">
+        <h3>📹 Automated Video Rendering</h3>
+        <p>Videos are rendered automatically using FFmpeg via GitHub Actions, combining imagery and music into polished final outputs.</p>
+      </div>
+      <div class="feature-card">
+        <h3>📱 TikTok Publishing</h3>
+        <p>Completed videos are automatically published to TikTok using the official TikTok Content Posting API with scheduled posting capabilities.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>TikTok API Integration</h2>
+    <div class="tiktok-section">
+      <p>
+        This application integrates with the TikTok Content Posting API to automate
+        the scheduling and publishing of relaxing ambient videos. The integration is
+        used solely for content creation and distribution purposes.
+      </p>
+      <p>API permissions requested:</p>
+      <ul>
+        <li>video.publish — To publish videos to the connected TikTok account</li>
+        <li>video.upload — To upload video files for publishing</li>
+        <li>user.info.basic — To verify account identity and publishing eligibility</li>
+      </ul>
+      <p style="margin-top:16px;">
+        All published content is original AI-generated material. No third-party
+        copyrighted content is used. Videos are reviewed before public posting
+        to ensure quality and compliance with TikTok's Community Guidelines.
+      </p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Content Policy</h2>
+    <p>
+      All videos produced by this system are original works created using licensed
+      AI generation tools. Content is designed to be calm, non-offensive, and suitable
+      for general audiences. No copyrighted music, imagery, or third-party intellectual
+      property is used.
+    </p>
+    <p>
+      We are committed to complying with TikTok's Terms of Service and Community
+      Guidelines. If you have any concerns about content published through this system,
+      please contact us using the information below.
+    </p>
+  </div>
+
+</main>
+
+<footer>
+  <div>
+    <a href="privacy-policy.html">Privacy Policy</a>
+    <a href="terms-of-service.html">Terms of Service</a>
+    <a href="mailto:myautopostjp@gmail.com">Contact</a>
+  </div>
+  <p>&copy; 2026 Idle Video Renderer. All rights reserved.</p>
+</footer>
+
 </body>
 </html>
