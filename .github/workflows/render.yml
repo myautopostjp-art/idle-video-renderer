@@ -163,6 +163,7 @@ jobs:
           if [ -z "$DRIVE_URL" ]; then
             DRIVE_URL="${{ steps.release.outputs.video_url }}"
           fi
+          VIDEO_TYPE=$(echo "$FILE_TAG" | grep -o '^[a-z]*')
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true}' || true
+            -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true, "video_type": "'"$VIDEO_TYPE"'"}' || true
