@@ -73,6 +73,7 @@ jobs:
             LABEL="bgm"
           fi
           echo "tag=${LABEL}_video-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+          echo "label=${LABEL}" >> $GITHUB_OUTPUT
 
       - name: Render video
         run: |
@@ -156,6 +157,64 @@ jobs:
           EOF
           python upload_to_drive.py
 
+      - name: Upload BGM audio to Google Drive
+        if: ${{ vars.GDRIVE_AUDIO_FOLDER_ID != '' && steps.params.outputs.label == 'bgm' }}
+        env:
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_AUDIO_FOLDER_ID: ${{ vars.GDRIVE_AUDIO_FOLDER_ID }}
+          FILE_TAG: ${{ steps.params.outputs.tag }}
+          BGM_URL: ${{ steps.params.outputs.bgm_url }}
+        run: |
+          cat << 'EOF' > upload_audio_to_drive.py
+          import os
+          import urllib.request
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          bgm_url = os.environ.get('BGM_URL', '')
+          if not bgm_url or bgm_url == 'none':
+              print('BGM URLが空またはnoneのためスキップします')
+              exit(0)
+
+          folder_id = os.environ['GDRIVE_AUDIO_FOLDER_ID']
+          file_tag = os.environ['FILE_TAG']
+          audio_filename = f'{file_tag}.mp3'
+
+          urllib.request.urlretrieve(bgm_url, audio_filename)
+
+          creds = Credentials(
+              token=None,
+              refresh_token=os.environ['GDRIVE_REFRESH_TOKEN'],
+              client_id=os.environ['GDRIVE_CLIENT_ID'],
+              client_secret=os.environ['GDRIVE_CLIENT_SECRET'],
+              token_uri='https://oauth2.googleapis.com/token',
+              scopes=['https://www.googleapis.com/auth/drive']
+          )
+
+          service = build('drive', 'v3', credentials=creds)
+
+          file_metadata = {
+              'name': audio_filename,
+              'parents': [folder_id]
+          }
+          media = MediaFileUpload(audio_filename, mimetype='audio/mpeg', resumable=True)
+          uploaded = service.files().create(
+              body=file_metadata, media_body=media, fields='id'
+          ).execute()
+
+          file_id = uploaded.get('id')
+          service.permissions().create(
+              fileId=file_id,
+              body={'type': 'anyone', 'role': 'reader'}
+          ).execute()
+
+          print(f'BGM音源をDriveに保存しました: https://drive.google.com/uc?export=download&id={file_id}')
+          EOF
+          python upload_audio_to_drive.py
+
       - name: Notify GAS (完成通知)
         if: ${{ vars.GAS_WEBHOOK_URL != '' }}
         run: |
@@ -163,7 +222,7 @@ jobs:
           if [ -z "$DRIVE_URL" ]; then
             DRIVE_URL="${{ steps.release.outputs.video_url }}"
           fi
-          VIDEO_TYPE=$(echo "$FILE_TAG" | grep -o '^[a-z]*')
+          VIDEO_TYPE="${{ steps.params.outputs.label }}"
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true, "video_type": "'"$VIDEO_TYPE"'"}' || true
