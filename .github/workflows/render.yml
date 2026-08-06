@@ -223,6 +223,14 @@ jobs:
             DRIVE_URL="${{ steps.release.outputs.video_url }}"
           fi
           VIDEO_TYPE="${{ steps.params.outputs.label }}"
+
+          # BGM動画の場合は画像URLリストをJSON配列として渡す
+          if [ -f image_urls.json ]; then
+            IMAGE_URLS_JSON=$(cat image_urls.json)
+          else
+            IMAGE_URLS_JSON="[]"
+          fi
+
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true, "video_type": "'"$VIDEO_TYPE"'"}' || true
+            -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true, "video_type": "'"$VIDEO_TYPE"'", "image_urls": '"$IMAGE_URLS_JSON"'}' || true
