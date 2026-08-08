@@ -18,7 +18,7 @@ on:
         required: false
         default: '3600'
   repository_dispatch:
-    types: [render-video, render-video-weather]
+    types: [render-video, render-video-weather, render-video-youtube-long]
 
 permissions:
   contents: write
@@ -54,6 +54,11 @@ jobs:
 
             if [ "${{ github.event.action }}" = "render-video-weather" ]; then
               echo '${{ toJson(github.event.client_payload.image_urls) }}' > image_urls.json
+            elif [ "${{ github.event.action }}" = "render-video-youtube-long" ]; then
+              echo '${{ toJson(github.event.client_payload.image_urls) }}' > image_urls.json
+              echo "intro_video_url=${{ github.event.client_payload.intro_video_url }}" >> $GITHUB_OUTPUT
+              echo "intro_duration=${{ github.event.client_payload.intro_duration || '20' }}" >> $GITHUB_OUTPUT
+              echo "theme_name=${{ github.event.client_payload.theme_name }}" >> $GITHUB_OUTPUT
             else
               echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
             fi
@@ -72,6 +77,11 @@ jobs:
           else
             LABEL="bgm"
           fi
+
+          if [ "${{ github.event.action }}" = "render-video-youtube-long" ]; then
+            LABEL="youtubelong"
+          fi
+
           echo "tag=${LABEL}_video-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
           echo "label=${LABEL}" >> $GITHUB_OUTPUT
 
@@ -79,10 +89,14 @@ jobs:
         run: |
           chmod +x render.sh
           if [ -f render_bgm_weather.sh ]; then chmod +x render_bgm_weather.sh; fi
+          if [ -f render_youtube_long.sh ]; then chmod +x render_youtube_long.sh; fi
 
           if [ "${{ steps.params.outputs.mode }}" = "render-video-weather" ]; then
             IMAGE_URLS=$(jq -r '.[]' image_urls.json | tr '\n' ' ')
             ./render_bgm_weather.sh "${{ steps.params.outputs.bgm_url }}" output.mp4 top.txt bottom.txt $IMAGE_URLS
+          elif [ "${{ steps.params.outputs.mode }}" = "render-video-youtube-long" ]; then
+            IMAGE_URLS=$(jq -r '.[]' image_urls.json | tr '\n' ' ')
+            ./render_youtube_long.sh "${{ steps.params.outputs.intro_video_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" "${{ steps.params.outputs.intro_duration }}" output.mp4 $IMAGE_URLS
           else
             ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4 top.txt bottom.txt
           fi
@@ -224,7 +238,7 @@ jobs:
           fi
           VIDEO_TYPE="${{ steps.params.outputs.label }}"
 
-          # BGM動画の場合は画像URLリストをJSON配列として渡す
+          # BGM/YouTube長尺動画の場合は画像URLリストをJSON配列として渡す
           if [ -f image_urls.json ]; then
             IMAGE_URLS_JSON=$(cat image_urls.json)
           else
