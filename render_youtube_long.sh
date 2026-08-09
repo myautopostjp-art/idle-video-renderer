@@ -43,27 +43,87 @@ for i in "${!STAGE_CLIP_URLS[@]}"; do
 done
 
 # ---- ②ループ部分の尺を計算 ----
+#      クロスフェードで各境目が重なるため、その分を上乗せしておかないと最終尺が足りなくなる
+#
+#      境目ごとに変化の速さを変える:
+#        slow(12秒) = 天候の変化、自然光の移り変わり、遠景の町明かりが徐々に灯る
+#                     → 長くかけることで「いつの間にか絵が変わっていた」体験になる
+#        fast(1.5秒) = 手前の単一光源が点く/消える(部屋のランプ、暖炉に火が点く瞬間)
+#                     → 現実には一瞬なので、ゆっくり変わるとかえって不自然
+XFADE_SLOW=12
+XFADE_FAST=1.5
+
+# TRANSITIONS環境変数(例: "slow,slow,fast,slow,slow")を配列にする
+# 指定がない場合は全てslowとして扱う
+IFS=',' read -ra TRANSITION_ARR <<< "${TRANSITIONS:-}"
+
+# 各境目のクロスフェード秒数を決める
+XFADE_DURATIONS=()
+BOUNDARY_COUNT=$((CLIP_COUNT - 1))
+for ((b=0; b<BOUNDARY_COUNT; b++)); do
+  if [ "${TRANSITION_ARR[$b]:-slow}" = "fast" ]; then
+    XFADE_DURATIONS+=("$XFADE_FAST")
+  else
+    XFADE_DURATIONS+=("$XFADE_SLOW")
+  fi
+done
+echo "境目ごとの変化速度: ${XFADE_DURATIONS[*]}"
+
+# クロスフェードで重なる合計秒数を求める
+OVERLAP_TOTAL=0
+for d in "${XFADE_DURATIONS[@]}"; do
+  OVERLAP_TOTAL=$(awk "BEGIN{print $OVERLAP_TOTAL + $d}")
+done
+
 LOOP_DURATION=$((TOTAL_DURATION - INTRO_DURATION))
-STAGE_DURATION=$((LOOP_DURATION / CLIP_COUNT))
-echo "ループ部分: ${LOOP_DURATION}秒 / 1段階あたり: ${STAGE_DURATION}秒"
+STAGE_DURATION=$(awk "BEGIN{printf \"%d\", ($LOOP_DURATION + $OVERLAP_TOTAL) / $CLIP_COUNT}")
+echo "ループ部分: ${LOOP_DURATION}秒 / 1段階あたり: ${STAGE_DURATION}秒 (重なり合計${OVERLAP_TOTAL}秒を上乗せ済み)"
 
 # ---- ③各段階の短い動画クリップを、STAGE_DURATION秒になるまでループ再生する ----
 #      (静止画ではなく実際に動いている数秒のクリップをループさせることで、常に動いて見える)
 for i in "${!STAGE_CLIP_URLS[@]}"; do
   ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
     -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
-    -c:v libx264 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4"
+    -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4"
 done
 
-# ---- ④ループ部分の段階動画を全部つなげる ----
-> concat_list.txt
-for i in "${!STAGE_CLIP_URLS[@]}"; do
-  echo "file 'stage_$i.mp4'" >> concat_list.txt
-done
-ffmpeg -y -f concat -safe 0 -i concat_list.txt -c copy loop_video.mp4
+# ---- ④ループ部分の段階動画を、クロスフェードでつなげる ----
+#      単純に連結すると段階の切り替わりで画がジャンプして「ブツ切り」に見えるため、
+#      境目を数秒かけて溶かし込むことで、天候が連続的に変化しているように見せる
+
+if [ "$CLIP_COUNT" -le 1 ]; then
+  # 段階が1つしかない場合はそのまま使う
+  cp stage_0.mp4 loop_video.mp4
+else
+  # xfadeは2本ずつしか処理できないため、先頭から順に1本ずつ溶かし込んでいく
+  cp stage_0.mp4 merged.mp4
+  MERGED_DURATION="$STAGE_DURATION"
+
+  for ((i=1; i<CLIP_COUNT; i++)); do
+    # この境目のクロスフェード秒数(slow/fastで変わる)
+    XF="${XFADE_DURATIONS[$((i-1))]}"
+    # これまで結合した映像の、末尾XF秒前から重ね始める
+    OFFSET=$(awk "BEGIN{print $MERGED_DURATION - $XF}")
+    echo "段階$((i+1))/${CLIP_COUNT} をクロスフェード${XF}秒で結合します(offset: ${OFFSET}秒)"
+
+    ffmpeg -y -i merged.mp4 -i "stage_$i.mp4" \
+      -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XF}:offset=${OFFSET}[v]" \
+      -map "[v]" -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an merged_next.mp4
+
+    mv merged_next.mp4 merged.mp4
+    # クロスフェードで重なった分だけ全体の尺が縮む
+    MERGED_DURATION=$(awk "BEGIN{print $MERGED_DURATION + $STAGE_DURATION - $XF}")
+  done
+
+  mv merged.mp4 loop_video.mp4
+fi
+
+echo "ループ部分の結合が完了しました"
 
 # ---- ⑤導入部とループ部分をつなげる(映像のみ、音声は後で合成) ----
 #      導入動画にも音声トラックがある可能性があるため、映像のみ抽出してから結合する
+#      ※ここはクロスフェードしない。導入部の最終フレームがstage1画像そのものなので、
+#        単純に連結するだけで自然につながる(溶かすとかえって不自然になる)
 ffmpeg -y -i intro_video.mp4 -an -c:v copy intro_video_noaudio.mp4 2>/dev/null || cp intro_video.mp4 intro_video_noaudio.mp4
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
