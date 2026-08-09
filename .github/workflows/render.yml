@@ -59,6 +59,7 @@ jobs:
               echo "intro_video_url=${{ github.event.client_payload.intro_video_url }}" >> $GITHUB_OUTPUT
               echo "intro_duration=${{ github.event.client_payload.intro_duration || '20' }}" >> $GITHUB_OUTPUT
               echo "theme_name=${{ github.event.client_payload.theme_name }}" >> $GITHUB_OUTPUT
+              echo "ambient_sound_url=${{ github.event.client_payload.ambient_sound_url || 'none' }}" >> $GITHUB_OUTPUT
             else
               echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
             fi
@@ -86,6 +87,8 @@ jobs:
           echo "label=${LABEL}" >> $GITHUB_OUTPUT
 
       - name: Render video
+        env:
+          AMBIENT_SOUND_URL: ${{ steps.params.outputs.ambient_sound_url }}
         run: |
           chmod +x render.sh
           if [ -f render_bgm_weather.sh ]; then chmod +x render_bgm_weather.sh; fi
@@ -229,6 +232,71 @@ jobs:
           EOF
           python upload_audio_to_drive.py
 
+      - name: Extract check frames from video
+        if: ${{ steps.params.outputs.label != 'youtubelong' }}
+        run: |
+          # 動画から3枚のフレーム(開始・中間・終了付近)を抽出し、最終チェック用に保存する
+          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${{ steps.params.outputs.tag }}.mp4")
+          DURATION_INT=${DURATION%.*}
+          MID=$((DURATION_INT / 2))
+          NEAR_END=$((DURATION_INT - 5))
+          if [ "$NEAR_END" -lt 0 ]; then NEAR_END=0; fi
+
+          ffmpeg -y -ss 2 -i "${{ steps.params.outputs.tag }}.mp4" -frames:v 1 -q:v 2 check_frame_1.jpg
+          ffmpeg -y -ss "$MID" -i "${{ steps.params.outputs.tag }}.mp4" -frames:v 1 -q:v 2 check_frame_2.jpg
+          ffmpeg -y -ss "$NEAR_END" -i "${{ steps.params.outputs.tag }}.mp4" -frames:v 1 -q:v 2 check_frame_3.jpg
+          echo "チェック用フレーム3枚を抽出しました"
+
+      - name: Upload check frames to Google Drive
+        id: checkframes
+        if: ${{ steps.params.outputs.label != 'youtubelong' && vars.GDRIVE_FOLDER_ID != '' }}
+        env:
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+          FILE_TAG: ${{ steps.params.outputs.tag }}
+        run: |
+          cat << 'EOF' > upload_check_frames.py
+          import os
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          folder_id = os.environ['GDRIVE_FOLDER_ID']
+          file_tag = os.environ['FILE_TAG']
+
+          creds = Credentials(
+              token=None,
+              refresh_token=os.environ['GDRIVE_REFRESH_TOKEN'],
+              client_id=os.environ['GDRIVE_CLIENT_ID'],
+              client_secret=os.environ['GDRIVE_CLIENT_SECRET'],
+              token_uri='https://oauth2.googleapis.com/token',
+              scopes=['https://www.googleapis.com/auth/drive']
+          )
+          service = build('drive', 'v3', credentials=creds)
+
+          urls = []
+          for i in range(1, 4):
+              frame_path = f'check_frame_{i}.jpg'
+              if not os.path.exists(frame_path):
+                  continue
+              file_metadata = {'name': f'{file_tag}_checkframe{i}.jpg', 'parents': [folder_id]}
+              media = MediaFileUpload(frame_path, mimetype='image/jpeg', resumable=True)
+              uploaded = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+              file_id = uploaded.get('id')
+              service.permissions().create(fileId=file_id, body={'type': 'anyone', 'role': 'reader'}).execute()
+              urls.append(f'https://drive.google.com/uc?export=download&id={file_id}')
+
+          import json
+          urls_json = json.dumps(urls)
+          print(f'チェックフレームURL: {urls_json}')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'frame_urls={urls_json}\n')
+          EOF
+          python upload_check_frames.py
+
       - name: Notify GAS (完成通知)
         if: ${{ vars.GAS_WEBHOOK_URL != '' }}
         run: |
@@ -245,6 +313,12 @@ jobs:
             IMAGE_URLS_JSON="[]"
           fi
 
+          # 完成動画の最終チェック用フレームURL(なければ空配列)
+          CHECK_FRAME_URLS='${{ steps.checkframes.outputs.frame_urls }}'
+          if [ -z "$CHECK_FRAME_URLS" ]; then
+            CHECK_FRAME_URLS="[]"
+          fi
+
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true, "video_type": "'"$VIDEO_TYPE"'", "image_urls": '"$IMAGE_URLS_JSON"'}' || true
+            -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true, "video_type": "'"$VIDEO_TYPE"'", "image_urls": '"$IMAGE_URLS_JSON"', "check_frame_urls": '"$CHECK_FRAME_URLS"'}' || true
