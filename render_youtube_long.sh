@@ -76,20 +76,28 @@ ffmpeg -y -f concat -safe 0 -i concat_full.txt -c copy full_video_noaudio.mp4
 #
 # 効果音あり・なしで処理を分岐する
 if [ "$HAS_AMBIENT" = true ]; then
-  echo "効果音+BGMの合成を行います..."
+  echo "効果音+BGMの合成を行います(帯域を棲み分けてミックス)..."
 
-  # BGM: ループしてINTRO_DURATION秒後からフェードイン、ループ部分は0.75音量
+  # 【設計根拠】
+  # 雨や風などの自然音はピンクノイズ特性を持ち、低域(特に500Hz以下)にエネルギーが集中している。
+  # そのためBGMの低域をそのまま重ねると両方が濁る。
+  # BGM側は250Hz以下をハイパスで削り、中高域だけを残して環境音の上に浮かせる。
+  # 環境音側は低域をそのまま活かし、耳につきやすい高域だけ軽く抑える。
+
+  # BGM: ループしてINTRO_DURATION秒後からフェードイン
+  #   highpass=f=250 で低域を環境音に明け渡す
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
-    -af "afade=t=in:st=${INTRO_DURATION}:d=3,volume=0.75" \
+    -af "highpass=f=250,afade=t=in:st=${INTRO_DURATION}:d=3,volume=0.8" \
     -c:a pcm_s16le bgm_full.wav
 
   # 効果音: ループして全体に流す
-  #   導入部は0.9音量(メイン)、ループ開始(INTRO_DURATION秒)から0.3音量へフェードダウン(5秒かけて)
+  #   導入部は0.9音量(メイン)、ループ開始から0.3音量へフェードダウン
+  #   lowpass=f=8000 で耳につきやすい超高域を軽く抑え、低〜中域の自然な厚みは残す
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
-    -af "volume=0.9,afade=t=out:st=${INTRO_DURATION}:d=5[fade_out_ch];[fade_out_ch]volume=0.3" \
+    -af "lowpass=f=8000,volume=0.9,afade=t=out:st=${INTRO_DURATION}:d=5[fade_out_ch];[fade_out_ch]volume=0.3" \
     -c:a pcm_s16le ambient_full.wav 2>/dev/null || \
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
-    -af "volume=0.35" \
+    -af "lowpass=f=8000,volume=0.3" \
     -c:a pcm_s16le ambient_full.wav
 
   # BGM + 効果音をミックス
