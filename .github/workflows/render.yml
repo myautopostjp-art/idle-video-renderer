@@ -18,13 +18,15 @@ on:
         required: false
         default: '3600'
   repository_dispatch:
-    types: [render-video, render-video-weather, render-video-youtube-long]
+    types: [render-video, render-video-weather, render-video-youtube-long, render-audio-preview]
 
 permissions:
   contents: write
 
 jobs:
   render:
+    # 音声プレビューは別ジョブ(audio-preview)で処理するため、ここでは走らせない
+    if: github.event.action != 'render-audio-preview'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -324,3 +326,102 @@ jobs:
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -d '{"video_url": "'"$DRIVE_URL"'", "status": "succeeded", "already_saved_to_drive": true, "video_type": "'"$VIDEO_TYPE"'", "image_urls": '"$IMAGE_URLS_JSON"', "check_frame_urls": '"$CHECK_FRAME_URLS"'}' || true
+
+  # ============================================================
+  # BGM + 効果音のミックス試聴版を作る
+  #
+  # 1時間の動画を作らずに音の相性だけを確認するためのジョブ。
+  # 本番のレンダリングと同じEQ・音量・残響設定で2分間の音声を書き出し、
+  # Driveに保存してメールで通知する。
+  # ============================================================
+  audio-preview:
+    if: github.event.action == 'render-audio-preview'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Set up Python for Drive upload
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Google Drive upload dependencies
+        run: pip install google-api-python-client google-auth google-auth-oauthlib
+
+      - name: Mix audio
+        id: mix
+        run: |
+          chmod +x render_audio_preview.sh
+          ./render_audio_preview.sh \
+            "${{ github.event.client_payload.bgm_url }}" \
+            "${{ github.event.client_payload.ambient_sound_url }}" \
+            "${{ github.event.client_payload.particle_key }}" \
+            "${{ github.event.client_payload.duration || '120' }}"
+
+          TAG="audiopreview_${{ github.event.client_payload.particle_key }}-$(date +%Y%m%d-%H%M%S)"
+          mv audio_preview.mp3 "${TAG}.mp3"
+          mv audio_preview_bgm_only.mp3 "${TAG}_bgm_only.mp3"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Upload to Google Drive
+        id: drive
+        if: ${{ vars.GDRIVE_AUDIO_FOLDER_ID != '' }}
+        env:
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_AUDIO_FOLDER_ID: ${{ vars.GDRIVE_AUDIO_FOLDER_ID }}
+          FILE_TAG: ${{ steps.mix.outputs.tag }}
+        run: |
+          cat << 'EOF' > upload_preview.py
+          import os
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          folder_id = os.environ['GDRIVE_AUDIO_FOLDER_ID']
+          file_tag = os.environ['FILE_TAG']
+
+          creds = Credentials(
+              token=None,
+              refresh_token=os.environ['GDRIVE_REFRESH_TOKEN'],
+              client_id=os.environ['GDRIVE_CLIENT_ID'],
+              client_secret=os.environ['GDRIVE_CLIENT_SECRET'],
+              token_uri='https://oauth2.googleapis.com/token',
+              scopes=['https://www.googleapis.com/auth/drive']
+          )
+          service = build('drive', 'v3', credentials=creds)
+
+          urls = []
+          for suffix in ['', '_bgm_only']:
+              name = f'{file_tag}{suffix}.mp3'
+              media = MediaFileUpload(name, mimetype='audio/mpeg', resumable=True)
+              uploaded = service.files().create(
+                  body={'name': name, 'parents': [folder_id]},
+                  media_body=media, fields='id'
+              ).execute()
+              fid = uploaded.get('id')
+              service.permissions().create(
+                  fileId=fid, body={'type': 'anyone', 'role': 'reader'}
+              ).execute()
+              url = f'https://drive.google.com/uc?export=download&id={fid}'
+              urls.append(url)
+              print(f'{name}: {url}')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'mixed_url={urls[0]}\n')
+              f.write(f'bgm_only_url={urls[1]}\n')
+          EOF
+          python upload_preview.py
+
+      - name: Notify GAS
+        if: ${{ vars.GAS_WEBHOOK_URL != '' }}
+        run: |
+          curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "succeeded", "video_type": "audio-preview", "particle_key": "${{ github.event.client_payload.particle_key }}", "mixed_url": "${{ steps.drive.outputs.mixed_url }}", "bgm_only_url": "${{ steps.drive.outputs.bgm_only_url }}"}' || true
