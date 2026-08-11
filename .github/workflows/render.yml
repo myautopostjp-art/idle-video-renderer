@@ -337,7 +337,9 @@ jobs:
   audio-preview:
     if: github.event.action == 'render-audio-preview'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 音質評価(Audiobox Aesthetics)はPyTorchとモデルのダウンロードを伴うため、
+    # 初回は10分近くかかることがある。余裕をみて30分にしている
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -353,6 +355,13 @@ jobs:
       - name: Install Google Drive upload dependencies
         run: pip install google-api-python-client google-auth google-auth-oauthlib
 
+      # 音質の自動評価に使う(Meta Audiobox Aesthetics)
+      # 人間の聴取評価と同等の精度が報告されている無料のオープンソースモデル
+      # 初回はモデルのダウンロードが走るため数分かかる
+      - name: Install audio quality assessment
+        continue-on-error: true
+        run: pip install audiobox_aesthetics
+
       - name: Mix audio
         id: mix
         run: |
@@ -367,6 +376,12 @@ jobs:
           mv audio_preview.mp3 "${TAG}.mp3"
           mv audio_preview_bgm_only.mp3 "${TAG}_bgm_only.mp3"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+          # 音質スコアを改行なしの1行にして後続ステップへ渡す
+          if [ -f score_summary.txt ]; then
+            SCORE=$(cat score_summary.txt | tr '\n' '|')
+            echo "score=${SCORE}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Upload to Google Drive
         id: drive
@@ -424,4 +439,4 @@ jobs:
         run: |
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{"status": "succeeded", "video_type": "audio-preview", "particle_key": "${{ github.event.client_payload.particle_key }}", "mixed_url": "${{ steps.drive.outputs.mixed_url }}", "bgm_only_url": "${{ steps.drive.outputs.bgm_only_url }}"}' || true
+            -d '{"status": "succeeded", "video_type": "audio-preview", "particle_key": "${{ github.event.client_payload.particle_key }}", "mixed_url": "${{ steps.drive.outputs.mixed_url }}", "bgm_only_url": "${{ steps.drive.outputs.bgm_only_url }}", "score": "${{ steps.mix.outputs.score }}"}' || true
