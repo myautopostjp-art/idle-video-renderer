@@ -70,6 +70,8 @@ done
 echo "境目ごとの変化速度: ${XFADE_DURATIONS[*]}"
 
 # クロスフェードで重なる合計秒数を求める
+# 新方式では境目の映像は前後の段階から半分ずつ供出されるため、
+# 全体としては境目の秒数分だけ尺が縮む
 OVERLAP_TOTAL=0
 for d in "${XFADE_DURATIONS[@]}"; do
   OVERLAP_TOTAL=$(awk "BEGIN{print $OVERLAP_TOTAL + $d}")
@@ -79,44 +81,73 @@ LOOP_DURATION=$((TOTAL_DURATION - INTRO_DURATION))
 STAGE_DURATION=$(awk "BEGIN{printf \"%d\", ($LOOP_DURATION + $OVERLAP_TOTAL) / $CLIP_COUNT}")
 echo "ループ部分: ${LOOP_DURATION}秒 / 1段階あたり: ${STAGE_DURATION}秒 (重なり合計${OVERLAP_TOTAL}秒を上乗せ済み)"
 
-# ---- ③各段階の短い動画クリップを、STAGE_DURATION秒になるまでループ再生する ----
+# ---- ③各段階の短い動画クリップを、必要な長さまでループ再生する ----
 #      (静止画ではなく実際に動いている数秒のクリップをループさせることで、常に動いて見える)
-for i in "${!STAGE_CLIP_URLS[@]}"; do
+#
+#      【処理設計】
+#      以前は「10分の動画に次の10分を溶かし込む」処理を5回繰り返していたが、
+#      回を追うごとに再エンコード対象が長くなり(最後は50分)、1時間の制限を超えていた。
+#
+#      そこで「境目の十数秒だけをクロスフェードで作り、本体はそのまま連結する」方式に変更する。
+#      再エンコードが必要なのは境目の数十秒分だけになるため、処理時間が劇的に短くなる。
+#
+#        [段階1本体][境目1][段階2本体][境目2][段階3本体]...
+#                    ↑ここだけxfadeで作る
+
+# 各段階について、本体部分の長さを求める
+#   先頭の段階  : 後ろの境目にだけ尺を取られる
+#   中間の段階  : 前後の境目に尺を取られる
+#   最後の段階  : 前の境目にだけ尺を取られる
+echo "各段階の動画を用意します..."
+for ((i=0; i<CLIP_COUNT; i++)); do
+  BEFORE=0
+  AFTER=0
+  [ "$i" -gt 0 ] && BEFORE="${XFADE_DURATIONS[$((i-1))]}"
+  [ "$i" -lt "$((CLIP_COUNT-1))" ] && AFTER="${XFADE_DURATIONS[$i]}"
+
+  # この段階が必要とする総尺(本体 + 前後の境目に供出する分)
   ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
     -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
-    -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4"
+    -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4" 2>/dev/null
+
+  # 境目に使う部分を切り出す
+  #   前の境目用: この段階の先頭BEFORE秒
+  #   後の境目用: この段階の末尾AFTER秒
+  if [ "$(awk "BEGIN{print ($AFTER > 0)}")" = "1" ]; then
+    TAIL_START=$(awk "BEGIN{print $STAGE_DURATION - $AFTER}")
+    ffmpeg -y -ss "$TAIL_START" -i "stage_$i.mp4" -t "$AFTER" \
+      -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "tail_$i.mp4" 2>/dev/null
+  fi
+  if [ "$(awk "BEGIN{print ($BEFORE > 0)}")" = "1" ]; then
+    ffmpeg -y -i "stage_$i.mp4" -t "$BEFORE" \
+      -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "head_$i.mp4" 2>/dev/null
+  fi
+
+  # 本体部分(境目に供出した分を除いた中間部分)を切り出す
+  BODY_DURATION=$(awk "BEGIN{print $STAGE_DURATION - $BEFORE - $AFTER}")
+  ffmpeg -y -ss "$BEFORE" -i "stage_$i.mp4" -t "$BODY_DURATION" \
+    -c copy "body_$i.mp4" 2>/dev/null
 done
 
-# ---- ④ループ部分の段階動画を、クロスフェードでつなげる ----
-#      単純に連結すると段階の切り替わりで画がジャンプして「ブツ切り」に見えるため、
-#      境目を数秒かけて溶かし込むことで、天候が連続的に変化しているように見せる
+# ---- ④境目だけクロスフェードを作り、本体と交互に連結する ----
+echo "境目のクロスフェードを作成します..."
+> concat_loop.txt
+for ((i=0; i<CLIP_COUNT; i++)); do
+  echo "file 'body_$i.mp4'" >> concat_loop.txt
 
-if [ "$CLIP_COUNT" -le 1 ]; then
-  # 段階が1つしかない場合はそのまま使う
-  cp stage_0.mp4 loop_video.mp4
-else
-  # xfadeは2本ずつしか処理できないため、先頭から順に1本ずつ溶かし込んでいく
-  cp stage_0.mp4 merged.mp4
-  MERGED_DURATION="$STAGE_DURATION"
+  # 最後の段階でなければ、次の段階との境目を作る
+  if [ "$i" -lt "$((CLIP_COUNT-1))" ]; then
+    XF="${XFADE_DURATIONS[$i]}"
+    echo "  段階$((i+1))→$((i+2)): ${XF}秒のクロスフェード"
+    ffmpeg -y -i "tail_$i.mp4" -i "head_$((i+1)).mp4" \
+      -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XF}:offset=0[v]" \
+      -map "[v]" -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "xfade_$i.mp4" 2>/dev/null
+    echo "file 'xfade_$i.mp4'" >> concat_loop.txt
+  fi
+done
 
-  for ((i=1; i<CLIP_COUNT; i++)); do
-    # この境目のクロスフェード秒数(slow/fastで変わる)
-    XF="${XFADE_DURATIONS[$((i-1))]}"
-    # これまで結合した映像の、末尾XF秒前から重ね始める
-    OFFSET=$(awk "BEGIN{print $MERGED_DURATION - $XF}")
-    echo "段階$((i+1))/${CLIP_COUNT} をクロスフェード${XF}秒で結合します(offset: ${OFFSET}秒)"
-
-    ffmpeg -y -i merged.mp4 -i "stage_$i.mp4" \
-      -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XF}:offset=${OFFSET}[v]" \
-      -map "[v]" -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an merged_next.mp4
-
-    mv merged_next.mp4 merged.mp4
-    # クロスフェードで重なった分だけ全体の尺が縮む
-    MERGED_DURATION=$(awk "BEGIN{print $MERGED_DURATION + $STAGE_DURATION - $XF}")
-  done
-
-  mv merged.mp4 loop_video.mp4
-fi
+# 本体とクロスフェードを順に連結する(再エンコードなし = 高速)
+ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
 
 echo "ループ部分の結合が完了しました"
 
