@@ -62,6 +62,7 @@ jobs:
               echo "intro_duration=${{ github.event.client_payload.intro_duration || '20' }}" >> $GITHUB_OUTPUT
               echo "theme_name=${{ github.event.client_payload.theme_name }}" >> $GITHUB_OUTPUT
               echo "ambient_sound_url=${{ github.event.client_payload.ambient_sound_url || 'none' }}" >> $GITHUB_OUTPUT
+              echo "particle_key=${{ github.event.client_payload.particle_key || '' }}" >> $GITHUB_OUTPUT
               echo "transitions=${{ github.event.client_payload.transitions || '' }}" >> $GITHUB_OUTPUT
             else
               echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
@@ -92,6 +93,7 @@ jobs:
       - name: Render video
         env:
           AMBIENT_SOUND_URL: ${{ steps.params.outputs.ambient_sound_url }}
+          PARTICLE_KEY: ${{ steps.params.outputs.particle_key }}
           TRANSITIONS: ${{ steps.params.outputs.transitions }}
         run: |
           chmod +x render.sh
