@@ -34,13 +34,14 @@ curl -sL "$AMBIENT_URL" -o ambient.mp3
 case "$PARTICLE_KEY" in
   onsen)
     BGM_EQ="equalizer=f=3000:width_type=o:width=1.5:g=-2,aecho=0.8:0.9:50:0.2"
-    AMBIENT_EQ="highpass=f=80,lowpass=f=8000,aecho=0.8:0.85:60:0.25"
-    AMBIENT_VOLUME=0.32
+    # loudnorm で効果音の音圧を揃えてから音量を決める(素材ごとの音量差を吸収する)
+    AMBIENT_EQ="highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2,aecho=0.8:0.85:60:0.25"
+    AMBIENT_VOLUME=0.45
     ;;
   *)
     BGM_EQ="highpass=f=250,aecho=0.8:0.9:50:0.2"
-    AMBIENT_EQ="lowpass=f=4000,aecho=0.8:0.85:60:0.25"
-    AMBIENT_VOLUME=0.25
+    AMBIENT_EQ="lowpass=f=4000,loudnorm=I=-20:TP=-2,aecho=0.8:0.85:60:0.25"
+    AMBIENT_VOLUME=0.3
     ;;
 esac
 echo "EQ設定: particleKey=${PARTICLE_KEY:-未指定} / 環境音の音量=${AMBIENT_VOLUME}"
