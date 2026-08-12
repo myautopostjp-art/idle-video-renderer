@@ -209,23 +209,48 @@ if [ "$HAS_AMBIENT" = true ]; then
   # 「2つの音が別々に鳴っている」状態になりやすい。
   # そこで環境音側の高域を大きく削り、遠景に退かせることで音楽と溶け合わせる。
 
-  # BGM: ループして、窓へ向かうあたりからフェードイン
-  #   highpass=f=250 で低域を環境音に明け渡す
-  #   aecho で環境音と同系統の残響を足し、同じ空間で鳴っているように聴かせる
+  # 【設計】BGMと環境音が「別々に鳴っている」状態を避けるための処理
+  #
+  # 環境音は種類によって周波数特性が違うため、EQの当て方を変える。
+  #
+  #  ・雨や波: 低域(〜250Hz)にエネルギーが集中したピンクノイズ特性。
+  #           BGM側の低域を削って場所を譲り、中高域だけを残して上に浮かせる。
+  #
+  #  ・湯の音: 中域(250Hz〜4kHz)が主体で低域は薄い。
+  #           BGM側の低域を削る必要はなく、むしろ低〜中低域を残して土台にする。
+  #           代わりに水の弾ける音が聴こえるよう、BGMの2〜5kHzを少し下げる。
+  #           環境音側は80Hz以下を削り、BGMのパッドをクリアに響かせる。
+
+  case "$PARTICLE_KEY" in
+    onsen)
+      # 湯の音: BGMは低域を残し、水の弾ける帯域(2〜5kHz)だけ軽く譲る
+      BGM_EQ="equalizer=f=3000:width_type=o:width=1.5:g=-2,aecho=0.8:0.9:50:0.2"
+      # 環境音: 低域を削ってBGMの土台を邪魔しない。高域は残して水の質感を活かす
+      AMBIENT_EQ="highpass=f=80,lowpass=f=8000,aecho=0.8:0.85:60:0.25"
+      # 湯の音は雨より音量が小さいので、少し上げる
+      AMBIENT_LOOP_VOLUME=0.32
+      ;;
+    *)
+      # 雨・波など低域の厚い環境音: BGMの低域を明け渡す
+      BGM_EQ="highpass=f=250,aecho=0.8:0.9:50:0.2"
+      AMBIENT_EQ="lowpass=f=4000,aecho=0.8:0.85:60:0.25"
+      AMBIENT_LOOP_VOLUME=0.25
+      ;;
+  esac
+  echo "音声EQ: particleKey=${PARTICLE_KEY:-未指定} / 環境音のループ音量=${AMBIENT_LOOP_VOLUME}"
+
+  # BGM: ループして、戸へ向かうあたりからフェードイン
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
-    -af "highpass=f=250,aecho=0.8:0.9:50:0.2,afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},volume=0.8" \
+    -af "${BGM_EQ},afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},volume=0.8" \
     -c:a pcm_s16le bgm_full.wav
 
   # 効果音: ループして全体に流す
-  #   導入部は0.9音量(室内から外の気配を感じさせる)、ループ開始から0.25音量へフェードダウン
-  #   lowpass=f=4000 で高域を落とし、音を奥に引っ込めてBGMの前に出させない
-  #   aecho で軽い残響を足し、BGMと同じ空間で鳴っているように馴染ませる
-  AMBIENT_EQ="lowpass=f=4000,aecho=0.8:0.85:60:0.25"
+  #   導入部は0.9音量(室内から外の気配を感じさせる)、ループ開始から通常音量へフェードダウン
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
-    -af "${AMBIENT_EQ},volume=0.9,afade=t=out:st=${INTRO_DURATION}:d=5[fade_out_ch];[fade_out_ch]volume=0.25" \
+    -af "${AMBIENT_EQ},volume=0.9,afade=t=out:st=${INTRO_DURATION}:d=5[fade_out_ch];[fade_out_ch]volume=${AMBIENT_LOOP_VOLUME}" \
     -c:a pcm_s16le ambient_full.wav 2>/dev/null || \
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
-    -af "${AMBIENT_EQ},volume=0.25" \
+    -af "${AMBIENT_EQ},volume=${AMBIENT_LOOP_VOLUME}" \
     -c:a pcm_s16le ambient_full.wav
 
   # BGM + 効果音をミックス
