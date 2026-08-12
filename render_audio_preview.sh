@@ -37,7 +37,7 @@ case "$PARTICLE_KEY" in
     # loudnorm で効果音の音圧を揃えてから音量を決める(素材ごとの音量差を吸収する)
     # aecho の遅延を長め(120ms)にして、岩に囲まれた露天風呂の広がりを出す
     AMBIENT_EQ="highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2,aecho=0.8:0.88:120:0.35"
-    AMBIENT_VOLUME=0.68
+    AMBIENT_VOLUME=0.40
     ;;
   *)
     BGM_EQ="highpass=f=250,aecho=0.8:0.9:50:0.2"
@@ -63,12 +63,14 @@ ffmpeg -y -i bgm_full.wav -i ambient_full.wav \
   -map "[aout]" -c:a libmp3lame -b:a 192k "audio_preview.mp3"
 
 # ---- ②-2 効果音の音量を変えた比較版も作る ----
-# どの比率が心地よいかは聴いてみないと決められないため、
-# 現在の設定の前後で2パターン用意して聴き比べられるようにする。
-#   控えめ … BGMが主役。効果音は空間の気配として薄く敷く
-#   強め   … 効果音の存在感が増し、その場にいる感覚が強まる
-echo "比較用に音量違いも書き出します..."
-for V in $(awk "BEGIN{printf \"%.2f %.2f\", $AMBIENT_VOLUME * 0.8, $AMBIENT_VOLUME * 1.3}"); do
+# 音量比は聴いてみないと決められないため、前後のパターンも用意しておく。
+# 比率が固まったら COMPARE_VOLUMES を空にすれば、標準版だけを作るようになる。
+#   (例) COMPARE_VOLUMES=""     … 比較版を作らない
+#        COMPARE_VOLUMES="0.8 1.3" … 0.8倍と1.3倍を作る
+COMPARE_VOLUMES=""
+[ -n "$COMPARE_VOLUMES" ] && echo "比較用に音量違いも書き出します..."
+for RATIO in $COMPARE_VOLUMES; do
+  V=$(awk "BEGIN{printf \"%.2f\", $AMBIENT_VOLUME * $RATIO}")
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$DURATION" \
     -af "${AMBIENT_EQ},volume=${V}" \
     -c:a pcm_s16le "ambient_${V}.wav" 2>/dev/null
