@@ -35,8 +35,9 @@ case "$PARTICLE_KEY" in
   onsen)
     BGM_EQ="equalizer=f=3000:width_type=o:width=1.5:g=-2,aecho=0.8:0.9:50:0.2"
     # loudnorm で効果音の音圧を揃えてから音量を決める(素材ごとの音量差を吸収する)
-    AMBIENT_EQ="highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2,aecho=0.8:0.85:60:0.25"
-    AMBIENT_VOLUME=0.45
+    # aecho の遅延を長め(120ms)にして、岩に囲まれた露天風呂の広がりを出す
+    AMBIENT_EQ="highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2,aecho=0.8:0.88:120:0.35"
+    AMBIENT_VOLUME=0.68
     ;;
   *)
     BGM_EQ="highpass=f=250,aecho=0.8:0.9:50:0.2"
@@ -67,7 +68,7 @@ ffmpeg -y -i bgm_full.wav -i ambient_full.wav \
 #   控えめ … BGMが主役。効果音は空間の気配として薄く敷く
 #   強め   … 効果音の存在感が増し、その場にいる感覚が強まる
 echo "比較用に音量違いも書き出します..."
-for V in $(awk "BEGIN{printf \"%.2f %.2f\", $AMBIENT_VOLUME * 0.6, $AMBIENT_VOLUME * 1.5}"); do
+for V in $(awk "BEGIN{printf \"%.2f %.2f\", $AMBIENT_VOLUME * 0.8, $AMBIENT_VOLUME * 1.3}"); do
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$DURATION" \
     -af "${AMBIENT_EQ},volume=${V}" \
     -c:a pcm_s16le "ambient_${V}.wav" 2>/dev/null
