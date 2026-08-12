@@ -269,7 +269,7 @@ if [ "$HAS_AMBIENT" = true ]; then
       AMBIENT_EQ_BASE="highpass=f=80,loudnorm=I=-20:TP=-2,aecho=0.8:0.88:120:0.35"
       AMBIENT_LOWPASS=8000
       # 湯の音は雨のように鳴り続ける音ではないため、しっかり上げる
-      AMBIENT_LOOP_VOLUME=0.54
+      AMBIENT_LOOP_VOLUME=0.40
       ;;
     *)
       # 雨・波など低域の厚い環境音: BGMの低域を明け渡す
