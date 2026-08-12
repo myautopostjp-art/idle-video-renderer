@@ -152,29 +152,49 @@ ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
 echo "ループ部分の結合が完了しました"
 
 # ---- ⑤導入部とループ部分をつなげる(映像のみ、音声は後で合成) ----
-#      導入動画にも音声トラックがある可能性があるため、映像のみ抽出してから結合する
 #      ※ここはクロスフェードしない。導入部の最終フレームがstage1画像そのものなので、
 #        単純に連結するだけで自然につながる(溶かすとかえって不自然になる)
-ffmpeg -y -i intro_video.mp4 -an -c:v copy intro_video_noaudio.mp4 2>/dev/null || cp intro_video.mp4 intro_video_noaudio.mp4
+#
+#      【重要】導入部とループ部分で解像度やフレームレートが違うと、
+#      連結した動画の途中で画角が変わってしまう。
+#      以前は導入部を -c:v copy でそのまま使っていたためこの問題が起きていた。
+#      ここでループ部分と同じ 1920x1080 / 30fps に揃えてから連結する。
+echo "導入部をループ部分と同じ規格に揃えます..."
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate \
+  -of default=nw=1 intro_video.mp4 || true
+
+ffmpeg -y -i intro_video.mp4 -an \
+  -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30" \
+  -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p intro_video_noaudio.mp4
+
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
 ffmpeg -y -f concat -safe 0 -i concat_full.txt -c copy full_video_noaudio.mp4
 
+# 念のため、完成した映像の解像度が一貫しているか確認する
+echo "--- 完成した映像の情報 ---"
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,duration \
+  -of default=nw=1 full_video_noaudio.mp4 || true
+
 # ---- ⑥音声合成 ----
 # 設計:
-#   「ホテルに着いた旅行者が室内を見回し、外へ出て景色を眺める」という導入部の流れに合わせる。
+#   「室内を見回し、開いた戸を抜けてテラスへ出る」という導入部の流れに合わせる。
 #
 #   0秒〜         : 効果音のみ。まだ室内にいるので、外の音は控えめに聴こえている
-#   BGM_FADE_START: BGMがフェードインし始める(窓へ向かって歩き出すあたり)
+#   BGM_FADE_START: BGMが立ち上がり始める(戸へ向かって歩き出すあたり)
 #   INTRO_DURATION: 外に出た時点では音楽が満ちており、景色と一緒に音楽を味わえる
 #
 #   完全な無音から始めると唐突なので、冒頭から効果音を敷いておく。
-#   効果音は導入部では強め(0.9)、ループ部分に入ったら控えめ(0.3)に下げてBGMを立たせる。
+#   効果音は導入部では強め(0.9)、ループ部分に入ったら控えめ(0.25)に下げてBGMを立たせる。
 
-# BGMのフェードインを始める時刻(導入部の終わる10秒前から)
-BGM_FADE_START=$(awk "BEGIN{v=$INTRO_DURATION-10; if(v<0) v=0; print v}")
+# BGMのフェードインを始める時刻
+#
+# 外に出て景色が開ける瞬間に音楽が満ちている状態にしたいので、
+# 導入部の終わる少し前から立ち上げ始め、終わりまでに全開になるよう逆算する。
+#   導入部20秒の場合: 13秒から立ち上がり、18秒で全開、20秒で外に出る
 BGM_FADE_DURATION=5
-echo "BGMフェードイン開始: ${BGM_FADE_START}秒(${BGM_FADE_DURATION}秒かけて立ち上げ)"
+BGM_FADE_START=$(awk "BEGIN{v=$INTRO_DURATION-7; if(v<0) v=0; print v}")
+echo "BGMフェードイン: ${BGM_FADE_START}秒から${BGM_FADE_DURATION}秒かけて立ち上げ(導入部は${INTRO_DURATION}秒)"
 
 # 効果音あり・なしで処理を分岐する
 if [ "$HAS_AMBIENT" = true ]; then
