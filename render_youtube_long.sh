@@ -44,7 +44,35 @@ fi
 echo "ループ用の段階動画クリップをダウンロード中..."
 CLIP_COUNT=${#STAGE_CLIP_URLS[@]}
 for i in "${!STAGE_CLIP_URLS[@]}"; do
-  curl -L -s -o "stage_clip_$i.mp4" "${STAGE_CLIP_URLS[$i]}"
+  curl -L -s -o "stage_clip_raw_$i.mp4" "${STAGE_CLIP_URLS[$i]}"
+done
+
+# ---- ①-2 クリップのカメラ移動を打ち消す ----
+#
+# LTXはプロンプトで「カメラを固定せよ」と指示しても、
+# ゆっくり左右にドリフトさせてしまうことがある。
+# ループ動画では6秒ごとに位置が戻るため、この動きが強く目立つ。
+#
+# vidstab で移動量を検出し、逆方向にずらして打ち消す。
+#   smoothing=0  … 平滑化せず、完全に固定する(手ぶれ補正ではなく静止が目的)
+#   relative=1   … 前フレームからの相対移動として補正する(こちらの方が効果が高い)
+#   zoom=8       … ずらした分の隙間を埋めるため、わずかに拡大する
+#
+# 情景の中の動き(湯気・水面・星の瞬き)は位置が変わらないので影響を受けない。
+echo "クリップのカメラ移動を除去します..."
+for ((i=0; i<CLIP_COUNT; i++)); do
+  if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
+       -vf "vidstabdetect=shakiness=10:accuracy=15:stepsize=6:result=stab_$i.trf" \
+       -f null - 2>/dev/null \
+     && ffmpeg -y -i "stage_clip_raw_$i.mp4" \
+       -vf "vidstabtransform=input=stab_$i.trf:smoothing=0:relative=1:optzoom=0:zoom=8:crop=black" \
+       -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -an "stage_clip_$i.mp4" 2>/dev/null; then
+    echo "  クリップ$((i+1)): 安定化しました"
+  else
+    # 安定化に失敗しても元のクリップで続行する
+    cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
+    echo "  クリップ$((i+1)): 安定化をスキップしました(元の映像を使用)"
+  fi
 done
 
 # ---- ②ループ部分の尺を計算 ----
@@ -230,20 +258,24 @@ if [ "$HAS_AMBIENT" = true ]; then
     onsen)
       # 湯の音: BGMは低域を残し、水の弾ける帯域(2〜5kHz)だけ軽く譲る
       BGM_EQ="equalizer=f=3000:width_type=o:width=1.5:g=-2,aecho=0.8:0.9:50:0.2"
-      # 環境音: 低域を削ってBGMの土台を邪魔しない。高域は残して水の質感を活かす
+      # 環境音: 低域を削ってBGMの土台を邪魔しない
       #   loudnorm で音圧を一定に揃えてから音量を決める。
       #   生成される効果音は素材ごとに音量がばらつくため、これがないと
       #   「作った音によっては全く聴こえない」という事故が起きる。
       #   aecho の遅延を長め(120ms)にして、岩に囲まれた露天風呂の広がりを出す
       #   (60msだと浴室のような狭い響きになる)
-      AMBIENT_EQ="highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2,aecho=0.8:0.88:120:0.35"
+      #
+      #   lowpass は距離感の表現で使うため、ここでは分けて持っておく
+      AMBIENT_EQ_BASE="highpass=f=80,loudnorm=I=-20:TP=-2,aecho=0.8:0.88:120:0.35"
+      AMBIENT_LOWPASS=8000
       # 湯の音は雨のように鳴り続ける音ではないため、しっかり上げる
       AMBIENT_LOOP_VOLUME=0.54
       ;;
     *)
       # 雨・波など低域の厚い環境音: BGMの低域を明け渡す
       BGM_EQ="highpass=f=250,aecho=0.8:0.9:50:0.2"
-      AMBIENT_EQ="lowpass=f=4000,loudnorm=I=-20:TP=-2,aecho=0.8:0.85:60:0.25"
+      AMBIENT_EQ_BASE="loudnorm=I=-20:TP=-2,aecho=0.8:0.85:60:0.25"
+      AMBIENT_LOWPASS=4000
       AMBIENT_LOOP_VOLUME=0.3
       ;;
   esac
@@ -254,14 +286,50 @@ if [ "$HAS_AMBIENT" = true ]; then
     -af "${BGM_EQ},afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},volume=0.8" \
     -c:a pcm_s16le bgm_full.wav
 
-  # 効果音: ループして全体に流す
-  #   導入部は0.9音量(室内から外の気配を感じさせる)、ループ開始から通常音量へフェードダウン
+  # 効果音: 導入部で「遠くから近づいてくる」ように変化させる
+  #
+  # 【設計】
+  # カメラは室内の奥から歩き出し、戸を抜けて湯船のそばへ出る。
+  # それなのに最初から音が大きいと、距離感が映像と食い違ってしまう。
+  #
+  # 遠くの音は「小さい」だけでなく「高域が減衰してこもって聴こえる」。
+  # 空気や壁が高い周波数から先に吸収するためで、音量だけを絞っても
+  # 「近くで小さく鳴っている音」にしか聴こえない。
+  #
+  # 【実装】
+  # 「遠い音」と「近い音」を別々に作り、導入部の長さをかけて入れ替える。
+  #   遠い音 … 1.2kHz以上を落としてこもらせ、音量も小さく
+  #   近い音 … 8kHzまで開けて水の弾ける音まで聴こえる、通常音量
+  # (volumeやlowpassに時間の式を書く方法もあるが、lowpassは動的な
+  #  周波数指定に対応していないため、2つ作って混ぜる方式にしている)
+  DIST_FAR_VOL=$(awk "BEGIN{printf \"%.3f\", $AMBIENT_LOOP_VOLUME * 0.28}")
+  echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${INTRO_DURATION}秒 → 近(${AMBIENT_LOOP_VOLUME}/開け)"
+
+  # 遠くで聴こえている状態
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
-    -af "${AMBIENT_EQ},volume=0.9,afade=t=out:st=${INTRO_DURATION}:d=5[fade_out_ch];[fade_out_ch]volume=${AMBIENT_LOOP_VOLUME}" \
-    -c:a pcm_s16le ambient_full.wav 2>/dev/null || \
+    -af "${AMBIENT_EQ_BASE},lowpass=f=1200,volume=${DIST_FAR_VOL}" \
+    -c:a pcm_s16le ambient_far.wav
+
+  # すぐそばで聴こえている状態
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
-    -af "${AMBIENT_EQ},volume=${AMBIENT_LOOP_VOLUME}" \
-    -c:a pcm_s16le ambient_full.wav
+    -af "${AMBIENT_EQ_BASE},lowpass=f=${AMBIENT_LOWPASS},volume=${AMBIENT_LOOP_VOLUME}" \
+    -c:a pcm_s16le ambient_near.wav
+
+  # 導入部をかけて遠い音から近い音へ入れ替える
+  if ffmpeg -y -i ambient_far.wav -i ambient_near.wav -filter_complex \
+      "[0:a]afade=t=out:st=0:d=${INTRO_DURATION}:curve=tri[far];\
+[1:a]afade=t=in:st=0:d=${INTRO_DURATION}:curve=tri[near];\
+[far][near]amix=inputs=2:duration=longest:normalize=0[out]" \
+      -map "[out]" -c:a pcm_s16le ambient_full.wav 2>/dev/null; then
+    echo "効果音に距離変化を適用しました"
+    rm -f ambient_far.wav ambient_near.wav
+  else
+    # 失敗した場合は一定音量で処理する
+    echo "距離変化の適用に失敗したため、一定音量で処理します"
+    ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
+      -af "${AMBIENT_EQ_BASE},lowpass=f=${AMBIENT_LOWPASS},volume=${AMBIENT_LOOP_VOLUME}" \
+      -c:a pcm_s16le ambient_full.wav
+  fi
 
   # BGM + 効果音をミックス
   #   ミックス後に軽いコンプレッションをかけ、2つの音を同じダイナミクスにまとめる
