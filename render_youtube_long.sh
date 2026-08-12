@@ -8,6 +8,11 @@
 # 環境変数: AMBIENT_SOUND_URL=効果音URL(省略可。省略時はBGMのみ)
 # =====================================================
 set -e
+
+# 【画質とファイルサイズ】
+# CRFは値が小さいほど高画質・大容量。放置動画は動きが穏やかなので23でも十分きれい。
+# 1時間の動画はCRF20だと2GBを超えることがあり、GitHub Releaseの上限に引っかかる。
+# 23にすると1GB前後に収まる。
 INTRO_VIDEO_URL="$1"
 BGM_URL="$2"
 TOTAL_DURATION="$3"
@@ -108,7 +113,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   # この段階が必要とする総尺(本体 + 前後の境目に供出する分)
   ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
     -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
-    -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4" 2>/dev/null
+    -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4" 2>/dev/null
 
   # 境目に使う部分を切り出す
   #   前の境目用: この段階の先頭BEFORE秒
@@ -116,11 +121,11 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   if [ "$(awk "BEGIN{print ($AFTER > 0)}")" = "1" ]; then
     TAIL_START=$(awk "BEGIN{print $STAGE_DURATION - $AFTER}")
     ffmpeg -y -ss "$TAIL_START" -i "stage_$i.mp4" -t "$AFTER" \
-      -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "tail_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "tail_$i.mp4" 2>/dev/null
   fi
   if [ "$(awk "BEGIN{print ($BEFORE > 0)}")" = "1" ]; then
     ffmpeg -y -i "stage_$i.mp4" -t "$BEFORE" \
-      -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "head_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "head_$i.mp4" 2>/dev/null
   fi
 
   # 本体部分(境目に供出した分を除いた中間部分)を切り出す
@@ -141,7 +146,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     echo "  段階$((i+1))→$((i+2)): ${XF}秒のクロスフェード"
     ffmpeg -y -i "tail_$i.mp4" -i "head_$((i+1)).mp4" \
       -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XF}:offset=0[v]" \
-      -map "[v]" -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -r 30 -an "xfade_$i.mp4" 2>/dev/null
+      -map "[v]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "xfade_$i.mp4" 2>/dev/null
     echo "file 'xfade_$i.mp4'" >> concat_loop.txt
   fi
 done
@@ -165,7 +170,7 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 
 ffmpeg -y -i intro_video.mp4 -an \
   -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30" \
-  -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p intro_video_noaudio.mp4
+  -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p intro_video_noaudio.mp4
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
@@ -233,7 +238,7 @@ if [ "$HAS_AMBIENT" = true ]; then
       #   (60msだと浴室のような狭い響きになる)
       AMBIENT_EQ="highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2,aecho=0.8:0.88:120:0.35"
       # 湯の音は雨のように鳴り続ける音ではないため、しっかり上げる
-      AMBIENT_LOOP_VOLUME=0.68
+      AMBIENT_LOOP_VOLUME=0.54
       ;;
     *)
       # 雨・波など低域の厚い環境音: BGMの低域を明け渡す
