@@ -229,9 +229,11 @@ if [ "$HAS_AMBIENT" = true ]; then
       #   loudnorm で音圧を一定に揃えてから音量を決める。
       #   生成される効果音は素材ごとに音量がばらつくため、これがないと
       #   「作った音によっては全く聴こえない」という事故が起きる。
-      AMBIENT_EQ="highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2,aecho=0.8:0.85:60:0.25"
+      #   aecho の遅延を長め(120ms)にして、岩に囲まれた露天風呂の広がりを出す
+      #   (60msだと浴室のような狭い響きになる)
+      AMBIENT_EQ="highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2,aecho=0.8:0.88:120:0.35"
       # 湯の音は雨のように鳴り続ける音ではないため、しっかり上げる
-      AMBIENT_LOOP_VOLUME=0.45
+      AMBIENT_LOOP_VOLUME=0.68
       ;;
     *)
       # 雨・波など低域の厚い環境音: BGMの低域を明け渡す
