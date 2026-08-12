@@ -41,8 +41,20 @@ if [ -n "$AMBIENT_SOUND_URL" ] && [ "$AMBIENT_SOUND_URL" != "none" ]; then
   HAS_AMBIENT=true
 fi
 
-echo "ループ用の段階動画クリップをダウンロード中..."
 CLIP_COUNT=${#STAGE_CLIP_URLS[@]}
+
+# ループ用のクリップが1本もないと、後の尺計算でゼロ除算になってしまう。
+# 原因が分かりにくいエラーで止まるのを避けるため、ここで明示的に知らせる。
+if [ "$CLIP_COUNT" -eq 0 ]; then
+  echo "エラー: ループ用の段階動画クリップが1本もありません"
+  echo ""
+  echo "ステップ①B(段階動画クリップの生成)が完了していない可能性があります。"
+  echo "GASで checkYoutubeLongState を実行して状態を確認し、"
+  echo "testYoutubeLongVideoStep1B でクリップを作ってから、もう一度お試しください。"
+  exit 1
+fi
+
+echo "ループ用の段階動画クリップをダウンロード中...(${CLIP_COUNT}本)"
 for i in "${!STAGE_CLIP_URLS[@]}"; do
   curl -L -s -o "stage_clip_raw_$i.mp4" "${STAGE_CLIP_URLS[$i]}"
 done
