@@ -113,11 +113,27 @@ jobs:
       - name: Rename output with unique timestamped filename
         run: mv output.mp4 "${{ steps.params.outputs.tag }}.mp4"
 
+      # GitHub Releaseへのアップロード(補助的な保存先)
+      #
+      # Releaseには2GBのサイズ上限があり、1時間の動画は超えることがある。
+      # 本来の保存先はGoogle Driveなので、ここで失敗しても処理を止めない。
+      # (以前はここで止まり、Driveへの保存まで実行されない事故が起きた)
       - name: Upload to Release
         id: release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          SIZE=$(stat -c%s "${{ steps.params.outputs.tag }}.mp4")
+          SIZE_MB=$((SIZE / 1024 / 1024))
+          echo "動画サイズ: ${SIZE_MB}MB"
+
+          # 2GB(2147483648バイト)を超えるとReleaseが受け付けないため、事前に判定する
+          if [ "$SIZE" -ge 2147483648 ]; then
+            echo "2GBを超えているためReleaseへのアップロードはスキップします(Driveには保存されます)"
+            exit 0
+          fi
+
           gh release create "${{ steps.params.outputs.tag }}" "${{ steps.params.outputs.tag }}.mp4" tiktokqKDPIBl5H1NvLbGlMCi1MU6K3bKB5wb9.txt \
             --title "放置動画 ${{ steps.params.outputs.tag }}" \
             --notes "自動生成された動画"
