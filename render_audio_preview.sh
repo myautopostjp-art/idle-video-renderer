@@ -25,19 +25,34 @@ curl -sL "$AMBIENT_URL" -o ambient.mp3
 
 # ---- ②本番と同じ設定でミックス ----
 # 【設計根拠】render_youtube_long.sh と同一の設定
-#   雨や風などの自然音はピンクノイズ特性を持ち、低域にエネルギーが集中している。
-#   BGM側は250Hz以下を削って環境音に明け渡し、中高域に居場所を作る。
-#   環境音側は高域を落として奥に引っ込め、BGMの前に出させない。
-#   両方に同系統の残響を足し、同じ空間で鳴っているように馴染ませる。
+#   環境音の種類によって周波数特性が違うため、EQの当て方を変える。
+#
+#   雨や波: 低域にエネルギーが集中 → BGM側の低域を削って場所を譲る
+#   湯の音: 中域が主体で低域は薄い → BGM側は低域を残して土台にし、
+#           水の弾ける帯域(2〜5kHz)だけ軽く下げる
 
-echo "BGMを処理します(highpass 250Hz + 残響)..."
+case "$PARTICLE_KEY" in
+  onsen)
+    BGM_EQ="equalizer=f=3000:width_type=o:width=1.5:g=-2,aecho=0.8:0.9:50:0.2"
+    AMBIENT_EQ="highpass=f=80,lowpass=f=8000,aecho=0.8:0.85:60:0.25"
+    AMBIENT_VOLUME=0.32
+    ;;
+  *)
+    BGM_EQ="highpass=f=250,aecho=0.8:0.9:50:0.2"
+    AMBIENT_EQ="lowpass=f=4000,aecho=0.8:0.85:60:0.25"
+    AMBIENT_VOLUME=0.25
+    ;;
+esac
+echo "EQ設定: particleKey=${PARTICLE_KEY:-未指定} / 環境音の音量=${AMBIENT_VOLUME}"
+
+echo "BGMを処理します..."
 ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$DURATION" \
-  -af "highpass=f=250,aecho=0.8:0.9:50:0.2,afade=t=in:st=0:d=3,volume=0.8" \
+  -af "${BGM_EQ},afade=t=in:st=0:d=3,volume=0.8" \
   -c:a pcm_s16le bgm_full.wav
 
-echo "効果音を処理します(lowpass 4000Hz + 残響)..."
+echo "効果音を処理します..."
 ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$DURATION" \
-  -af "lowpass=f=4000,aecho=0.8:0.85:60:0.25,volume=0.25" \
+  -af "${AMBIENT_EQ},volume=${AMBIENT_VOLUME}" \
   -c:a pcm_s16le ambient_full.wav
 
 echo "ミックスします(+ 軽いコンプレッション)..."
