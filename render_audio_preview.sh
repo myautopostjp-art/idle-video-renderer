@@ -61,6 +61,23 @@ ffmpeg -y -i bgm_full.wav -i ambient_full.wav \
   -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[mixed];[mixed]acompressor=threshold=0.15:ratio=3:attack=200:release=1000[aout]" \
   -map "[aout]" -c:a libmp3lame -b:a 192k "audio_preview.mp3"
 
+# ---- ②-2 効果音の音量を変えた比較版も作る ----
+# どの比率が心地よいかは聴いてみないと決められないため、
+# 現在の設定の前後で2パターン用意して聴き比べられるようにする。
+#   控えめ … BGMが主役。効果音は空間の気配として薄く敷く
+#   強め   … 効果音の存在感が増し、その場にいる感覚が強まる
+echo "比較用に音量違いも書き出します..."
+for V in $(awk "BEGIN{printf \"%.2f %.2f\", $AMBIENT_VOLUME * 0.6, $AMBIENT_VOLUME * 1.5}"); do
+  ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$DURATION" \
+    -af "${AMBIENT_EQ},volume=${V}" \
+    -c:a pcm_s16le "ambient_${V}.wav" 2>/dev/null
+  ffmpeg -y -i bgm_full.wav -i "ambient_${V}.wav" \
+    -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[mixed];[mixed]acompressor=threshold=0.15:ratio=3:attack=200:release=1000[aout]" \
+    -map "[aout]" -c:a libmp3lame -b:a 192k "audio_preview_vol${V}.mp3" 2>/dev/null
+  rm -f "ambient_${V}.wav"
+  echo "  効果音の音量 ${V} 版を作成しました"
+done
+
 # ---- ③比較用にBGM単体も書き出す ----
 # 効果音を足したことで良くなったのか悪くなったのか判断できるようにする
 echo "比較用にBGM単体も書き出します..."
