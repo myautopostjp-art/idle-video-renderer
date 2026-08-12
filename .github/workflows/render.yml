@@ -499,6 +499,13 @@ jobs:
           TAG="audiopreview_${{ github.event.client_payload.particle_key }}-$(date +%Y%m%d-%H%M%S)"
           mv audio_preview.mp3 "${TAG}.mp3"
           mv audio_preview_bgm_only.mp3 "${TAG}_bgm_only.mp3"
+          # 音量違いの比較版(ファイル名に音量が入っている)
+          for f in audio_preview_vol*.mp3; do
+            [ -e "$f" ] || continue
+            SUFFIX="${f#audio_preview_}"
+            mv "$f" "${TAG}_${SUFFIX}"
+          done
+          ls -la ${TAG}*.mp3
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
 
           # 音質スコアを改行なしの1行にして後続ステップへ渡す
@@ -537,8 +544,16 @@ jobs:
           service = build('drive', 'v3', credentials=creds)
 
           urls = []
-          for suffix in ['', '_bgm_only']:
-              name = f'{file_tag}{suffix}.mp3'
+          import glob
+
+          # 標準版・BGM単体に加え、音量違いの比較版もまとめてアップロードする
+          targets = [f'{file_tag}.mp3', f'{file_tag}_bgm_only.mp3']
+          targets += sorted(glob.glob(f'{file_tag}_vol*.mp3'))
+
+          compare_urls = []
+          for name in targets:
+              if not os.path.exists(name):
+                  continue
               media = MediaFileUpload(name, mimetype='audio/mpeg', resumable=True)
               uploaded = service.files().create(
                   body={'name': name, 'parents': [folder_id]},
@@ -551,10 +566,14 @@ jobs:
               url = f'https://drive.google.com/uc?export=download&id={fid}'
               urls.append(url)
               print(f'{name}: {url}')
+              if '_vol' in name:
+                  vol = name.split('_vol')[1].replace('.mp3', '')
+                  compare_urls.append(f'音量{vol}: {url}')
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'mixed_url={urls[0]}\n')
-              f.write(f'bgm_only_url={urls[1]}\n')
+              f.write(f'mixed_url={urls[0] if len(urls) > 0 else ""}\n')
+              f.write(f'bgm_only_url={urls[1] if len(urls) > 1 else ""}\n')
+              f.write('compare_urls=' + '|'.join(compare_urls) + '\n')
           EOF
           python upload_preview.py
 
@@ -563,4 +582,4 @@ jobs:
         run: |
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{"status": "succeeded", "video_type": "audio-preview", "particle_key": "${{ github.event.client_payload.particle_key }}", "mixed_url": "${{ steps.drive.outputs.mixed_url }}", "bgm_only_url": "${{ steps.drive.outputs.bgm_only_url }}", "score": "${{ steps.mix.outputs.score }}"}' || true
+            -d '{"status": "succeeded", "video_type": "audio-preview", "particle_key": "${{ github.event.client_payload.particle_key }}", "mixed_url": "${{ steps.drive.outputs.mixed_url }}", "bgm_only_url": "${{ steps.drive.outputs.bgm_only_url }}", "score": "${{ steps.mix.outputs.score }}", "compare_urls": "${{ steps.drive.outputs.compare_urls }}"}' || true
