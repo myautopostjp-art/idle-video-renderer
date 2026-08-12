@@ -263,13 +263,20 @@ jobs:
       # ============================================================
       - name: Check video quality with Gemini
         id: videocheck
-        if: ${{ steps.params.outputs.label == 'youtubelong' && secrets.GEMINI_API_KEY != '' }}
+        if: ${{ steps.params.outputs.label == 'youtubelong' }}
         continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FILE_TAG: ${{ steps.params.outputs.tag }}
           INTRO_DURATION: ${{ github.event.client_payload.intro_duration || '20' }}
         run: |
+          # APIキーが未設定ならスキップする
+          # (if条件では secrets を参照できないため、ここで判定する)
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY が未設定のため、動画チェックをスキップします"
+            exit 0
+          fi
+
           VIDEO="${FILE_TAG}.mp4"
           DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$VIDEO")
           DURATION_INT=${DURATION%.*}
@@ -415,120 +422,6 @@ jobs:
       # 「雨が止まっていないか」「カメラが不自然に動いていないか」など、
       # 静止画では分からない問題を検出することが目的。
       # ============================================================
-      - name: Review video with Gemini
-        id: review
-        if: ${{ steps.params.outputs.label == 'youtubelong' }}
-        continue-on-error: true
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          FILE_TAG: ${{ steps.params.outputs.tag }}
-        run: |
-          VIDEO="${FILE_TAG}.mp4"
-          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$VIDEO")
-          DURATION_INT=${DURATION%.*}
-
-          # 抜粋を3箇所から切り出す
-          #   1) 冒頭      : 導入部のカメラワークと天候の動き
-          #   2) 導入部直後 : 導入部からループへの切り替わり(画角が変わっていないか)
-          #   3) 中盤      : 段階の切り替わりとループ部分の動き
-          INTRO_END=${{ github.event.client_payload.intro_duration || 20 }}
-          MID=$((DURATION_INT / 2))
-
-          ffmpeg -y -ss 3 -i "$VIDEO" -t 8 -an -vf "scale=640:-2" -c:v libx264 -preset veryfast clip_1.mp4 2>/dev/null
-          ffmpeg -y -ss "$((INTRO_END - 3))" -i "$VIDEO" -t 8 -an -vf "scale=640:-2" -c:v libx264 -preset veryfast clip_2.mp4 2>/dev/null
-          ffmpeg -y -ss "$MID" -i "$VIDEO" -t 8 -an -vf "scale=640:-2" -c:v libx264 -preset veryfast clip_3.mp4 2>/dev/null
-          ls -la clip_*.mp4
-
-          cat << 'PYEOF_INNER' > review_video.py
-          import os, json, base64, urllib.request
-
-          api_key = os.environ['GEMINI_API_KEY']
-          clips = [
-              ('clip_1.mp4', '動画の冒頭(導入部)'),
-              ('clip_2.mp4', '導入部からループ部分への切り替わり'),
-              ('clip_3.mp4', '動画の中盤(ループ部分)'),
-          ]
-
-          parts = []
-          for path, label in clips:
-              if not os.path.exists(path):
-                  continue
-              with open(path, 'rb') as f:
-                  data = base64.b64encode(f.read()).decode('utf-8')
-              parts.append({'text': f'--- {label} ---'})
-              parts.append({'inline_data': {'mime_type': 'video/mp4', 'data': data}})
-
-          if not parts:
-              print('評価する映像がありません')
-              raise SystemExit(0)
-
-          # インライン送信は20MBが上限。超える場合はクリップを減らして収める
-          def total_size():
-              return sum(len(p.get('inline_data', {}).get('data', '')) for p in parts)
-
-          while total_size() > 18 * 1024 * 1024 and len(parts) > 2:
-              parts = parts[:-2]
-              print('サイズ超過のためクリップを1本減らしました')
-          print(f'送信サイズ: {total_size()/1024/1024:.2f} MB')
-
-          prompt = """これは1時間の作業用・睡眠用BGM動画から抜き出した3つの場面です。
-          宿泊施設のテラスから絶景を眺める映像で、視聴者は長時間流しっぱなしにします。
-
-          次の観点で問題がないか確認し、日本語で指摘してください。
-
-          1. 雨・雪・炎・水面などが動いているか(止まった絵に見えていないか)
-          2. ループ部分でカメラがズームやパンをしていないか(固定されているべき)
-          3. 導入部からループ部分に移るとき、画角や解像度が変わっていないか
-          4. 映像が暗すぎたり明るすぎたりしないか
-          5. 破綻がないか(水面の不自然な模様、光の粒の散乱、物体の歪みなど)
-          6. 作業用BGM動画として、1時間流していて心地よいか
-
-          出力はJSONのみ:
-          {"ok": true/false, "issues": ["問題点1", "問題点2"], "good": ["良い点1"], "comment": "総評を2〜3文で"}
-          問題がなければ issues は空配列にしてください。
-          説明文やマークダウンは含めないでください。"""
-
-          parts.append({'text': prompt})
-
-          payload = json.dumps({
-              'contents': [{'parts': parts}],
-              'generationConfig': {'responseMimeType': 'application/json'}
-          }).encode('utf-8')
-
-          url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}'
-          req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-
-          try:
-              with urllib.request.urlopen(req, timeout=300) as res:
-                  body = json.loads(res.read().decode('utf-8'))
-              text = next(p['text'] for p in body['candidates'][0]['content']['parts'] if 'text' in p)
-              result = json.loads(text)
-          except Exception as e:
-              print('評価に失敗しました:', e)
-              raise SystemExit(0)
-
-          lines = []
-          lines.append('【総評】')
-          lines.append(result.get('comment', ''))
-          if result.get('issues'):
-              lines.append('')
-              lines.append('【気になった点】')
-              for i in result['issues']:
-                  lines.append('・' + i)
-          if result.get('good'):
-              lines.append('')
-              lines.append('【良かった点】')
-              for g in result['good']:
-                  lines.append('・' + g)
-
-          summary = '\n'.join(lines)
-          print(summary)
-
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write('review=' + summary.replace('\n', '|') + '\n')
-          PYEOF_INNER
-          python review_video.py
-
       - name: Notify GAS (完成通知)
         if: ${{ vars.GAS_WEBHOOK_URL != '' }}
         run: |
