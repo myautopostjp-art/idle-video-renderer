@@ -18,7 +18,7 @@ on:
         required: false
         default: '3600'
   repository_dispatch:
-    types: [render-video, render-video-weather, render-video-youtube-long, render-audio-preview]
+    types: [render-video, render-video-weather, render-video-youtube-long, render-audio-preview, extract-last-frame]
 
 permissions:
   contents: write
@@ -26,7 +26,7 @@ permissions:
 jobs:
   render:
     # 音声プレビューは別ジョブ(audio-preview)で処理するため、ここでは走らせない
-    if: github.event.action != 'render-audio-preview'
+    if: github.event.action != 'render-audio-preview' && github.event.action != 'extract-last-frame'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -624,3 +624,105 @@ jobs:
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -d '{"status": "succeeded", "video_type": "audio-preview", "particle_key": "${{ github.event.client_payload.particle_key }}", "mixed_url": "${{ steps.drive.outputs.mixed_url }}", "bgm_only_url": "${{ steps.drive.outputs.bgm_only_url }}", "score": "${{ steps.mix.outputs.score }}", "compare_urls": "${{ steps.drive.outputs.compare_urls }}"}' || true
+
+  # ============================================================
+  # 動画の最終フレームを画像として抜き出す
+  #
+  # 導入部の動画が終わる位置と、ループ動画が始まる位置を完全に一致させるために使う。
+  #
+  # LTXに「この画像で終われ」と指定しても、生成される最終フレームは
+  # 指定した画像と完全には一致しない。そのため導入部とループのつなぎ目に
+  # わずかなずれが生じてしまう。
+  #
+  # そこで導入部の実際の最終フレームを抜き出し、それを起点にループ動画を作る。
+  # こうすれば両者は物理的に同じ画像から始まるため、ずれが原理的に発生しない。
+  # ============================================================
+  extract-last-frame:
+    if: github.event.action == 'extract-last-frame'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Set up Python for Drive upload
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Google Drive upload dependencies
+        run: pip install google-api-python-client google-auth google-auth-oauthlib
+
+      - name: Extract last frame
+        id: extract
+        run: |
+          curl -L -s -o source.mp4 "${{ github.event.client_payload.video_url }}"
+
+          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 source.mp4)
+          echo "動画の長さ: ${DURATION}秒"
+
+          # 末尾から取り出す。完全な最後のフレームは崩れていることがあるため、
+          # ほんのわずか手前(0.1秒前)を使う
+          ffmpeg -y -sseof -0.1 -i source.mp4 -vframes 1 -q:v 2 last_frame.jpg
+
+          # 抜き出せたか確認する
+          if [ ! -s last_frame.jpg ]; then
+            echo "末尾からの抽出に失敗したため、時間指定で再試行します"
+            SEEK=$(awk "BEGIN{v=$DURATION-0.2; if(v<0) v=0; print v}")
+            ffmpeg -y -ss "$SEEK" -i source.mp4 -vframes 1 -q:v 2 last_frame.jpg
+          fi
+
+          ls -la last_frame.jpg
+          FRAME_TAG="lastframe-$(date +%Y%m%d-%H%M%S)"
+          mv last_frame.jpg "${FRAME_TAG}.jpg"
+          echo "tag=${FRAME_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Upload to Google Drive
+        id: drive
+        if: ${{ vars.GDRIVE_FOLDER_ID != '' }}
+        env:
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+          FILE_TAG: ${{ steps.extract.outputs.tag }}
+        run: |
+          cat << 'EOF' > upload_frame.py
+          import os
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          creds = Credentials(
+              token=None,
+              refresh_token=os.environ['GDRIVE_REFRESH_TOKEN'],
+              client_id=os.environ['GDRIVE_CLIENT_ID'],
+              client_secret=os.environ['GDRIVE_CLIENT_SECRET'],
+              token_uri='https://oauth2.googleapis.com/token',
+              scopes=['https://www.googleapis.com/auth/drive']
+          )
+          service = build('drive', 'v3', credentials=creds)
+
+          name = os.environ['FILE_TAG'] + '.jpg'
+          media = MediaFileUpload(name, mimetype='image/jpeg', resumable=True)
+          uploaded = service.files().create(
+              body={'name': name, 'parents': [os.environ['GDRIVE_FOLDER_ID']]},
+              media_body=media, fields='id'
+          ).execute()
+          fid = uploaded.get('id')
+          service.permissions().create(
+              fileId=fid, body={'type': 'anyone', 'role': 'reader'}
+          ).execute()
+          url = f'https://drive.google.com/uc?export=download&id={fid}'
+          print('最終フレーム:', url)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'frame_url={url}\n')
+          EOF
+          python upload_frame.py
+
+      - name: Notify GAS
+        if: ${{ vars.GAS_WEBHOOK_URL != '' }}
+        run: |
+          curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "succeeded", "video_type": "last-frame", "frame_url": "${{ steps.drive.outputs.frame_url }}"}' || true
