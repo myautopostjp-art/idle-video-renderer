@@ -307,8 +307,11 @@ jobs:
           INTRO_END=$((INTRO_DURATION - 3))
           if [ "$INTRO_END" -lt 0 ]; then INTRO_END=0; fi
           MID=$((DURATION_INT / 2))
-          # ループ周期の切れ目に合わせる(導入部の後は6秒周期で繰り返している)
-          MID=$(( INTRO_DURATION + ((MID - INTRO_DURATION) / 6) * 6 ))
+          # ループ周期の切れ目に合わせる
+          # (クリップは6秒で生成されるが、シームレスループ加工で末尾1秒が
+          #  先頭に溶け込むため、実際の繰り返し周期は5秒になる)
+          LOOP_PERIOD=5
+          MID=$(( INTRO_DURATION + ((MID - INTRO_DURATION) / LOOP_PERIOD) * LOOP_PERIOD ))
 
           echo "動画チェック用のクリップを切り出します(全体${DURATION_INT}秒)"
           echo "  1つ目: 3秒〜(導入部) / 2つ目: ${INTRO_END}秒〜(境目) / 3つ目: ${MID}秒〜(ループ部分)"
