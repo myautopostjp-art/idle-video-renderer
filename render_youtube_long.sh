@@ -87,6 +87,41 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   fi
 done
 
+# ---- ①-3 クリップをシームレスループに加工する ----
+#
+# 6秒のクリップをそのまま繰り返すと、最後のフレームから最初のフレームへ
+# 一瞬で切り替わるため、位置や湯気の形の差が「カクッ」という違和感になる。
+#
+# そこで末尾1秒と先頭1秒をクロスフェードで溶かし合わせ、
+# 「終わりの画=始まりの画」となる5秒の完全ループを作る。
+#
+#   [1〜5秒の本体][末尾1秒が先頭1秒へ溶けていく]
+#    → 継ぎ目が原理的に存在しなくなる
+#
+# 湯気・水面・星の瞬きは形の定まらない被写体なので、
+# 1秒のディゾルブは自然な動きにしか見えない。
+# カメラのドリフトが残っていても、跳ぶのではなく柔らかく溶けるため目立たない。
+XFADE_LOOP=1
+echo "クリップをシームレスループに加工します..."
+for ((i=0; i<CLIP_COUNT; i++)); do
+  CLIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
+  BODY_END=$(awk "BEGIN{print $CLIP_DUR - $XFADE_LOOP}")
+
+  if ffmpeg -y -i "stage_clip_$i.mp4" -filter_complex \
+      "[0:v]trim=start=${XFADE_LOOP}:end=${BODY_END},setpts=PTS-STARTPTS[main];\
+[0:v]trim=start=${BODY_END},setpts=PTS-STARTPTS[tail];\
+[0:v]trim=start=0:end=${XFADE_LOOP},setpts=PTS-STARTPTS[head];\
+[tail][head]xfade=transition=fade:duration=${XFADE_LOOP}:offset=0[wrap];\
+[main][wrap]concat=n=2:v=1[out]" \
+      -map "[out]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_loop_$i.mp4" 2>/dev/null; then
+    LOOP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_loop_$i.mp4")
+    echo "  クリップ$((i+1)): シームレスループ化しました(${CLIP_DUR}秒 → ${LOOP_DUR}秒)"
+    mv "stage_loop_$i.mp4" "stage_clip_$i.mp4"
+  else
+    echo "  クリップ$((i+1)): 加工に失敗したため、そのまま使います"
+  fi
+done
+
 # ---- ②ループ部分の尺を計算 ----
 #      クロスフェードで各境目が重なるため、その分を上乗せしておかないと最終尺が足りなくなる
 #
