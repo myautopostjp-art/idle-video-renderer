@@ -59,32 +59,16 @@ for i in "${!STAGE_CLIP_URLS[@]}"; do
   curl -L -s -o "stage_clip_raw_$i.mp4" "${STAGE_CLIP_URLS[$i]}"
 done
 
-# ---- ①-2 クリップのカメラ移動を打ち消す ----
+# ---- ①-2 クリップの下ごしらえ ----
 #
-# LTXはプロンプトで「カメラを固定せよ」と指示しても、
-# ゆっくり左右にドリフトさせてしまうことがある。
-# ループ動画では6秒ごとに位置が戻るため、この動きが強く目立つ。
-#
-# vidstab で移動量を検出し、逆方向にずらして打ち消す。
-#   smoothing=0  … 平滑化せず、完全に固定する(手ぶれ補正ではなく静止が目的)
-#   relative=1   … 前フレームからの相対移動として補正する(こちらの方が効果が高い)
-#   zoom=8       … ずらした分の隙間を埋めるため、わずかに拡大する
-#
-# 情景の中の動き(湯気・水面・星の瞬き)は位置が変わらないので影響を受けない。
-echo "クリップのカメラ移動を除去します..."
+# 【vidstabによる安定化は廃止した】
+# 以前はドリフト対策としてvidstabで補正していたが、隙間埋めのための
+# 拡大(zoom=8)がループクリップだけに掛かるため、導入部から切り替わる
+# 瞬間に画が一回り大きくなる問題を起こした。
+# ドリフト対策はシームレスループ加工(末尾と先頭のクロスフェード)に
+# 一本化する。継ぎ目が溶けるため、多少のドリフトは目立たない。
 for ((i=0; i<CLIP_COUNT; i++)); do
-  if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
-       -vf "vidstabdetect=shakiness=10:accuracy=15:stepsize=6:result=stab_$i.trf" \
-       -f null - 2>/dev/null \
-     && ffmpeg -y -i "stage_clip_raw_$i.mp4" \
-       -vf "vidstabtransform=input=stab_$i.trf:smoothing=0:relative=1:optzoom=0:zoom=8:crop=black" \
-       -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -an "stage_clip_$i.mp4" 2>/dev/null; then
-    echo "  クリップ$((i+1)): 安定化しました"
-  else
-    # 安定化に失敗しても元のクリップで続行する
-    cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
-    echo "  クリップ$((i+1)): 安定化をスキップしました(元の映像を使用)"
-  fi
+  cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
 done
 
 # ---- ①-3 クリップをシームレスループに加工する ----
