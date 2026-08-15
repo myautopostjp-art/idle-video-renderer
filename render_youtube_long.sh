@@ -59,16 +59,37 @@ for i in "${!STAGE_CLIP_URLS[@]}"; do
   curl -L -s -o "stage_clip_raw_$i.mp4" "${STAGE_CLIP_URLS[$i]}"
 done
 
-# ---- ①-2 クリップの下ごしらえ ----
+# ---- ①-2 クリップの再生速度を落とす ----
+#
+# 【なぜ必要か】
+# LTXにプロンプトで「雲はほとんど動かない」と指示しても守られず、
+# ループ部分の雲だけが早回しのように流れてしまう。
+# 導入部の雲はゆっくり動くため、切り替わる瞬間に速度差が目立つ。
+#
+# プロンプトで抑えきれない以上、生成後に再生速度を落とすのが確実。
+# 湯気や水面もあわせてゆっくりになるが、放置動画では
+# むしろ落ち着いて見えるので都合がよい。
+#
+# 副産物として、6秒のクリップが10秒に伸びるためループ周期も長くなり、
+# 「同じ映像の繰り返し」に気づかれにくくなる。
 #
 # 【vidstabによる安定化は廃止した】
-# 以前はドリフト対策としてvidstabで補正していたが、隙間埋めのための
-# 拡大(zoom=8)がループクリップだけに掛かるため、導入部から切り替わる
-# 瞬間に画が一回り大きくなる問題を起こした。
-# ドリフト対策はシームレスループ加工(末尾と先頭のクロスフェード)に
-# 一本化する。継ぎ目が溶けるため、多少のドリフトは目立たない。
+# 隙間埋めのための拡大(zoom=8)がループクリップだけに掛かるため、
+# 導入部から切り替わる瞬間に画が一回り大きくなる問題を起こしていた。
+# ドリフト対策はシームレスループ加工(末尾と先頭のクロスフェード)に一本化する。
+LOOP_SPEED=0.6   # 1.0で等速。小さくするほどゆっくりになる
+echo "ループクリップの再生速度を${LOOP_SPEED}倍に落とします(雲の流れを導入部に合わせるため)..."
 for ((i=0; i<CLIP_COUNT; i++)); do
-  cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
+  if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
+       -vf "setpts=PTS/${LOOP_SPEED},fps=30" -an \
+       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "stage_clip_$i.mp4" 2>/dev/null; then
+    RAW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_raw_$i.mp4")
+    NEW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
+    echo "  クリップ$((i+1)): ${RAW_DUR}秒 → ${NEW_DUR}秒"
+  else
+    cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
+    echo "  クリップ$((i+1)): 速度変更に失敗したため、そのまま使います"
+  fi
 done
 
 # ---- ①-3 クリップをシームレスループに加工する ----
