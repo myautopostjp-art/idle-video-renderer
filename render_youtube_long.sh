@@ -77,7 +77,12 @@ done
 # 隙間埋めのための拡大(zoom=8)がループクリップだけに掛かるため、
 # 導入部から切り替わる瞬間に画が一回り大きくなる問題を起こしていた。
 # ドリフト対策はシームレスループ加工(末尾と先頭のクロスフェード)に一本化する。
-LOOP_SPEED=0.6   # 1.0で等速。小さくするほどゆっくりになる
+# 【調整の目安】
+#   1.0  … 等速(LTXが生成したまま。雲が早回しに見える)
+#   0.6  … 6秒→10秒。雲は落ち着くが、導入部のほぼ静止した雲とはまだ差がある
+#   0.4  … 6秒→15秒。雲の動きが1/3以下になり、導入部との差がほぼ分からなくなる
+#          湯気や水面もゆっくりになるが、放置動画ではむしろ落ち着いて見える
+LOOP_SPEED=0.4
 echo "ループクリップの再生速度を${LOOP_SPEED}倍に落とします(雲の流れを導入部に合わせるため)..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
@@ -121,6 +126,16 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       -map "[out]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_loop_$i.mp4" 2>/dev/null; then
     LOOP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_loop_$i.mp4")
     echo "  クリップ$((i+1)): シームレスループ化しました(${CLIP_DUR}秒 → ${LOOP_DUR}秒)"
+
+    # 【重要】加工後のクリップは「元の${XFADE_LOOP}秒地点」から始まる。
+    # 導入部の最終フレームは元の0秒地点なので、そのまま繋ぐと
+    # 切り替わった瞬間に${XFADE_LOOP}秒分の動きが飛んでしまう。
+    # そこで元の0〜${XFADE_LOOP}秒を別に取っておき、ループの一番最初にだけ挟む。
+    #   [導入部 …元の0秒][元の0〜1秒][加工済みループ(1秒地点から)]…
+    # こうすれば全ての繋ぎ目が連続する。
+    ffmpeg -y -i "stage_clip_$i.mp4" -t "$XFADE_LOOP" \
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "loop_head_$i.mp4" 2>/dev/null
+
     mv "stage_loop_$i.mp4" "stage_clip_$i.mp4"
   else
     echo "  クリップ$((i+1)): 加工に失敗したため、そのまま使います"
@@ -191,9 +206,25 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   [ "$i" -lt "$((CLIP_COUNT-1))" ] && AFTER="${XFADE_DURATIONS[$i]}"
 
   # この段階が必要とする総尺(本体 + 前後の境目に供出する分)
-  ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
-    -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
-    -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4" 2>/dev/null
+  #
+  # 最初の段階だけは、導入部との繋ぎ目を連続させるため
+  # 「元の0〜1秒」を先頭に挟んでからループさせる
+  if [ "$i" -eq 0 ] && [ -f "loop_head_$i.mp4" ]; then
+    BODY_LEN=$(awk "BEGIN{print $STAGE_DURATION - $XFADE_LOOP}")
+    ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$BODY_LEN" \
+      -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_body_$i.mp4" 2>/dev/null
+    ffmpeg -y -i "loop_head_$i.mp4" \
+      -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4" 2>/dev/null
+    printf "file 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
+    ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4" 2>/dev/null
+    echo "  段階1: 導入部と繋がるよう先頭${XFADE_LOOP}秒を挟みました"
+  else
+    ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
+      -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4" 2>/dev/null
+  fi
 
   # 境目に使う部分を切り出す
   #   前の境目用: この段階の先頭BEFORE秒
