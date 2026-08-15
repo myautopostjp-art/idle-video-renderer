@@ -83,6 +83,17 @@ done
 #   0.4  … 6秒→15秒。雲の動きが1/3以下になり、導入部との差がほぼ分からなくなる
 #          湯気や水面もゆっくりになるが、放置動画ではむしろ落ち着いて見える
 LOOP_SPEED=0.4
+# 【診断用】導入部とループクリップの解像度を記録しておく
+# 両者の縦横比が違うと、画面に収める際の拡大率が変わり、
+# 切り替わる瞬間に画が広がったように見えてしまう
+echo "--- 素材の解像度 ---"
+echo -n "  導入部: "
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 intro_video.mp4 || true
+for ((i=0; i<CLIP_COUNT; i++)); do
+  echo -n "  ループクリップ$((i+1)): "
+  ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "stage_clip_raw_$i.mp4" || true
+done
+
 echo "ループクリップの再生速度を${LOOP_SPEED}倍に落とします(雲の流れを導入部に合わせるため)..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
@@ -111,7 +122,9 @@ done
 # 湯気・水面・星の瞬きは形の定まらない被写体なので、
 # 1秒のディゾルブは自然な動きにしか見えない。
 # カメラのドリフトが残っていても、跳ぶのではなく柔らかく溶けるため目立たない。
-XFADE_LOOP=1
+# ループの継ぎ目、および導入部との境目を溶かす秒数
+# 長いほど繋ぎ目が分かりにくくなるが、その分ループ周期が短くなる
+XFADE_LOOP=2
 echo "クリップをシームレスループに加工します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   CLIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
@@ -210,19 +223,42 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   # 最初の段階だけは、導入部との繋ぎ目を連続させるため
   # 「元の0〜1秒」を先頭に挟んでからループさせる
   if [ "$i" -eq 0 ] && [ -f "loop_head_$i.mp4" ]; then
+    # 【導入部との境目を溶かす】
+    #
+    # 導入部の映像は等速だが、ループ部分は再生速度を落としてある。
+    # 位置や画角が完全に一致していても、湯気や雲の動く速さが変わるため
+    # 切り替わった瞬間に「何かが変わった」と感じられてしまう。
+    #
+    # 導入部の末尾とループの先頭を重ねて溶かすと、
+    # 移り変わっている最中はテンポの比較ができなくなり、違和感が消える。
     BODY_LEN=$(awk "BEGIN{print $STAGE_DURATION - $XFADE_LOOP}")
     ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$BODY_LEN" \
-      -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
+      -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_body_$i.mp4" 2>/dev/null
     ffmpeg -y -i "loop_head_$i.mp4" \
-      -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
+      -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4" 2>/dev/null
-    printf "file 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
+
+    # 導入部の末尾を切り出して、ループの先頭と溶かし合わせる
+    INTRO_REAL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video.mp4)
+    TAIL_FROM=$(awk "BEGIN{v=$INTRO_REAL - $XFADE_LOOP; if(v<0) v=0; print v}")
+    if ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_LOOP" -an \
+         -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30" \
+         -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "intro_tail.mp4" 2>/dev/null \
+       && ffmpeg -y -i "intro_tail.mp4" -i "stage_headpart_$i.mp4" \
+         -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XFADE_LOOP}:offset=0[v]" \
+         -map "[v]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "boundary.mp4" 2>/dev/null; then
+      printf "file 'boundary.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" > "headjoin_$i.txt"
+      INTRO_TRIM="$TAIL_FROM"
+      echo "  段階1: 導入部との境目を${XFADE_LOOP}秒かけて溶かします"
+    else
+      printf "file 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
+      echo "  段階1: 境目の加工に失敗したため、そのまま繋ぎます"
+    fi
     ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4" 2>/dev/null
-    echo "  段階1: 導入部と繋がるよう先頭${XFADE_LOOP}秒を挟みました"
   else
     ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
-      -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
+      -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4" 2>/dev/null
   fi
 
@@ -279,8 +315,15 @@ echo "導入部をループ部分と同じ規格に揃えます..."
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate \
   -of default=nw=1 intro_video.mp4 || true
 
-ffmpeg -y -i intro_video.mp4 -an \
-  -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30" \
+# 境目を溶かした場合、その分は既にループ側の先頭に含まれているため
+# 導入部からは末尾を取り除いておく(重複を避ける)
+INTRO_CUT=""
+if [ -n "${INTRO_TRIM:-}" ]; then
+  INTRO_CUT="-t $INTRO_TRIM"
+  echo "  境目に使った末尾${XFADE_LOOP}秒を導入部から取り除きます"
+fi
+ffmpeg -y -i intro_video.mp4 $INTRO_CUT -an \
+  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30" \
   -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p intro_video_noaudio.mp4
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
