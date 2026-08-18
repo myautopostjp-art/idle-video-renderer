@@ -125,6 +125,14 @@ done
 # ループの継ぎ目、および導入部との境目を溶かす秒数
 # 長いほど繋ぎ目が分かりにくくなるが、その分ループ周期が短くなる
 XFADE_LOOP=3
+
+# 導入部とループの境目を溶かす秒数
+#
+# ループの継ぎ目(XFADE_LOOP)とは別に設定する。
+# 導入部の終盤はカメラが停止しているため、長く溶かすと二重像が
+# 動かないまま居座り、「残像」として見えてしまう。
+# 1秒程度なら、残像と認識される前に切り替わりが終わる。
+XFADE_INTRO=1
 echo "クリップをシームレスループに加工します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   CLIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
@@ -240,17 +248,39 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4" 2>/dev/null
 
     # 導入部の末尾を切り出して、ループの先頭と溶かし合わせる
+    #
+    # 【なぜループの継ぎ目とは別の秒数にするか】
+    # ループの継ぎ目(XFADE_LOOP)は長いほど滑らかになるが、
+    # 導入部との境目は長いほど「残像」が目立つ。
+    # 導入部の終盤はカメラが停止しているため、二重像が動かずに居座ってしまう。
+    # そのため境目だけを短くして、残像として認識される前に切り替え終える。
     INTRO_REAL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video.mp4)
-    TAIL_FROM=$(awk "BEGIN{v=$INTRO_REAL - $XFADE_LOOP; if(v<0) v=0; print v}")
-    if ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_LOOP" -an \
+    TAIL_FROM=$(awk "BEGIN{v=$INTRO_REAL - $XFADE_INTRO; if(v<0) v=0; print v}")
+    HEAD_REST=$(awk "BEGIN{print $XFADE_LOOP - $XFADE_INTRO}")
+
+    # ループ先頭部分を「境目で溶かす分」と「そのまま流す分」に分ける
+    ffmpeg -y -i "stage_headpart_$i.mp4" -t "$XFADE_INTRO" \
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "head_blend_$i.mp4" 2>/dev/null
+    HAS_HEAD_REST=false
+    if awk "BEGIN{exit !($HEAD_REST > 0.05)}"; then
+      ffmpeg -y -ss "$XFADE_INTRO" -i "stage_headpart_$i.mp4" \
+        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "head_rest_$i.mp4" 2>/dev/null \
+        && HAS_HEAD_REST=true
+    fi
+
+    if ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
          -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30" \
          -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "intro_tail.mp4" 2>/dev/null \
-       && ffmpeg -y -i "intro_tail.mp4" -i "stage_headpart_$i.mp4" \
-         -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XFADE_LOOP}:offset=0[v]" \
+       && ffmpeg -y -i "intro_tail.mp4" -i "head_blend_$i.mp4" \
+         -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XFADE_INTRO}:offset=0[v]" \
          -map "[v]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "boundary.mp4" 2>/dev/null; then
-      printf "file 'boundary.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" > "headjoin_$i.txt"
+      if [ "$HAS_HEAD_REST" = true ]; then
+        printf "file 'boundary.mp4'\nfile 'head_rest_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
+      else
+        printf "file 'boundary.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" > "headjoin_$i.txt"
+      fi
       INTRO_TRIM="$TAIL_FROM"
-      echo "  段階1: 導入部との境目を${XFADE_LOOP}秒かけて溶かします"
+      echo "  段階1: 導入部との境目を${XFADE_INTRO}秒かけて溶かします(ループの継ぎ目は${XFADE_LOOP}秒)"
     else
       printf "file 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
       echo "  段階1: 境目の加工に失敗したため、そのまま繋ぎます"
