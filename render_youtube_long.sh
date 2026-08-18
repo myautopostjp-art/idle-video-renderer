@@ -407,10 +407,51 @@ if [ "$HAS_AMBIENT" = true ]; then
   esac
   echo "音声EQ: particleKey=${PARTICLE_KEY:-未指定} / 環境音のループ音量=${AMBIENT_LOOP_VOLUME}"
 
-  # BGM: ループして、戸へ向かうあたりからフェードイン
+  # BGM: 室内では編成が薄く、外に出ると開けるように変化させる
+  #
+  # 【設計】
+  # 導入部で別の曲を流すと、切り替わる瞬間に「曲が変わった」と分かってしまう。
+  # そこで同じ曲のまま、室内にいるあいだは音を削っておく。
+  #
+  #   室内: 高域を落とす → 琴の粒立ちや倍音が消え、パッドと低域だけが残る
+  #         響きを増やす → 隣の部屋から漏れ聴こえるような距離感になる
+  #         音量を絞る
+  #   屋外: 削っていた帯域が戻り、音量も上がる
+  #
+  # 曲そのものは変わっていないのに、戸を開けた瞬間に楽器が増えたように聴こえる。
+  # 「同じ音楽が空間ごと広がる」体験になり、繋ぎ目が生まれない。
+  #
+  # ※効果音の距離変化と同じ2本方式。lowpassは時間で変化させられないため、
+  #   こもった版と開けた版を別々に作って入れ替える。
+  BGM_INDOOR_LOWPASS=1800    # 室内で残す帯域の上限(下げるほど編成が薄く聴こえる)
+  BGM_INDOOR_VOLUME=0.32     # 室内でのBGM音量(屋外は0.8)
+  BGM_OPENING=$(awk "BEGIN{v=$INTRO_DURATION; if(v<3) v=3; print v}")
+  echo "BGMの空間変化: 室内(${BGM_INDOOR_LOWPASS}Hz以下・音量${BGM_INDOOR_VOLUME}) → ${BGM_OPENING}秒かけて屋外へ開く"
+
+  # 室内で聴こえている状態(こもって、響いて、控えめ)
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
-    -af "${BGM_EQ},afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},volume=0.8" \
-    -c:a pcm_s16le bgm_full.wav
+    -af "${BGM_EQ},lowpass=f=${BGM_INDOOR_LOWPASS},aecho=0.8:0.9:180:0.4,volume=${BGM_INDOOR_VOLUME}" \
+    -c:a pcm_s16le bgm_indoor.wav
+
+  # 屋外に出た状態(開けて、通常音量)
+  ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
+    -af "${BGM_EQ},volume=0.8" \
+    -c:a pcm_s16le bgm_outdoor.wav
+
+  # 導入部をかけて室内の響きから屋外の響きへ入れ替える
+  if ffmpeg -y -i bgm_indoor.wav -i bgm_outdoor.wav -filter_complex \
+      "[0:a]afade=t=out:st=0:d=${BGM_OPENING}:curve=tri[ind];\
+[1:a]afade=t=in:st=0:d=${BGM_OPENING}:curve=tri[outd];\
+[ind][outd]amix=inputs=2:duration=longest:normalize=0[out]" \
+      -map "[out]" -c:a pcm_s16le bgm_full.wav 2>/dev/null; then
+    echo "BGMに空間変化を適用しました(室内では編成が薄く聴こえます)"
+    rm -f bgm_indoor.wav bgm_outdoor.wav
+  else
+    echo "空間変化の適用に失敗したため、従来のフェードインで処理します"
+    ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
+      -af "${BGM_EQ},afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},volume=0.8" \
+      -c:a pcm_s16le bgm_full.wav
+  fi
 
   # 効果音: 導入部で「遠くから近づいてくる」ように変化させる
   #
