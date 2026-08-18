@@ -124,7 +124,7 @@ done
 # カメラのドリフトが残っていても、跳ぶのではなく柔らかく溶けるため目立たない。
 # ループの継ぎ目、および導入部との境目を溶かす秒数
 # 長いほど繋ぎ目が分かりにくくなるが、その分ループ周期が短くなる
-XFADE_LOOP=2
+XFADE_LOOP=3
 echo "クリップをシームレスループに加工します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   CLIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
