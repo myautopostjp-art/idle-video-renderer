@@ -308,9 +308,9 @@ jobs:
           if [ "$INTRO_END" -lt 0 ]; then INTRO_END=0; fi
           MID=$((DURATION_INT / 2))
           # ループ周期の切れ目に合わせる
-          # (クリップは6秒で生成 → 再生速度0.6倍で10秒 →
-          #  シームレスループ加工で末尾1秒が先頭に溶けるため、繰り返し周期は9秒)
-          LOOP_PERIOD=9
+          # (クリップは6秒で生成 → 再生速度0.4倍で15秒 →
+          #  シームレスループ加工で末尾3秒が先頭に溶けるため、繰り返し周期は12秒)
+          LOOP_PERIOD=12
           MID=$(( INTRO_DURATION + ((MID - INTRO_DURATION) / LOOP_PERIOD) * LOOP_PERIOD ))
 
           echo "動画チェック用のクリップを切り出します(全体${DURATION_INT}秒)"
