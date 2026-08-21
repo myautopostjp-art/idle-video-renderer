@@ -127,6 +127,60 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   fi
 done
 
+# ---- ①-2b ループクリップのカメラドリフトを止める ----
+#
+# 【なぜ必要か】
+# プロンプトで "The camera is locked off on a fixed mount... no pan, no tilt, no drift"
+# と強く書いてもLTXは守らず、ループクリップの中でカメラがゆっくり一方向に流れる。
+# ループは12秒で先頭に戻るため、視聴者には
+# 「12秒かけてスクロールしては元に戻る」という不自然な繰り返しに見えてしまう。
+#
+# プロンプトで3回試して直らなかったので、後処理で確実に潰す方針に切り替える。
+#
+# 【以前vidstabを廃止した理由と、その解決】
+# 以前は隙間を埋める拡大(zoom)がループクリップにだけ掛かっていたため、
+# 導入部から切り替わる瞬間に画が一回り大きくなる問題が起きて廃止した。
+# 今回は「導入部にもまったく同じ倍率の拡大をかける」ことで解決する。
+# 下の STABILIZE_ZOOM は⑤の導入部処理でも同じ値が使われる。
+#
+# smoothing=0 は「カメラは静止しているはず」という前提で補正するモード。
+# 移動平均で滑らかにするのではなく、ドリフトそのものを打ち消す。
+STABILIZE_ZOOM=8   # 補正で生じる縁の隙間を埋めるための拡大率(%)
+
+# ffmpegがvidstabを含まないビルドの場合もあるため、使えるか先に確認する
+# (使えなければ安定化を飛ばす。動画自体は作れる)
+HAS_VIDSTAB=false
+if ffmpeg -hide_banner -filters 2>/dev/null | grep -q vidstabtransform; then
+  HAS_VIDSTAB=true
+else
+  echo "※このffmpegはvidstabを含まないため、カメラの安定化を飛ばします"
+fi
+
+if [ "$HAS_VIDSTAB" = true ]; then
+  echo "ループクリップのカメラドリフトを補正します(拡大${STABILIZE_ZOOM}%)..."
+  for ((i=0; i<CLIP_COUNT; i++)); do
+    if ffmpeg -y -i "stage_clip_$i.mp4" \
+         -vf "vidstabdetect=shakiness=4:accuracy=15:result=transforms_$i.trf" \
+         -f null - 2>"err_vsdetect_$i.log" \
+       && ffmpeg -y -i "stage_clip_$i.mp4" \
+         -vf "vidstabtransform=input=transforms_$i.trf:smoothing=0:optzoom=0:zoom=${STABILIZE_ZOOM}:interpol=bicubic" \
+         -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_stab_$i.mp4" 2>"err_vstrans_$i.log"; then
+      mv "stage_stab_$i.mp4" "stage_clip_$i.mp4"
+      echo "  クリップ$((i+1)): ドリフトを補正しました"
+    else
+      echo "  クリップ$((i+1)): 補正に失敗したため、そのまま使います"
+      tail -3 "err_vsdetect_$i.log" "err_vstrans_$i.log" 2>/dev/null || true
+      # 補正できなかった場合、このクリップだけ拡大されない状態になる。
+      # 導入部との大きさを揃えるため、拡大だけは同じ倍率でかけておく。
+      if ffmpeg -y -i "stage_clip_$i.mp4" \
+           -vf "crop=iw/(1+${STABILIZE_ZOOM}/100):ih/(1+${STABILIZE_ZOOM}/100),scale=1920:1080" \
+           -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_zoom_$i.mp4" 2>/dev/null; then
+        mv "stage_zoom_$i.mp4" "stage_clip_$i.mp4"
+      fi
+    fi
+  done
+fi
+
 # ---- ①-3 クリップをシームレスループに加工する ----
 #
 # 6秒のクリップをそのまま繰り返すと、最後のフレームから最初のフレームへ
@@ -229,6 +283,18 @@ else
   GOP_OPTS=""
 fi
 
+# 導入部にかける拡大の指定を組み立てる
+#
+# 安定化でループ側が STABILIZE_ZOOM % 拡大されるため、導入部にも同じ倍率をかけて
+# 切り替わる瞬間に画の大きさが変わらないようにする。
+# 安定化を行わなかった場合は拡大なし(空文字)。
+if [ "$HAS_VIDSTAB" = true ]; then
+  INTRO_ZOOM_VF="crop=iw/(1+${STABILIZE_ZOOM}/100):ih/(1+${STABILIZE_ZOOM}/100),scale=1920:1080,"
+  echo "導入部にもループと同じ${STABILIZE_ZOOM}%の拡大をかけます(切り替わりで画の大きさを揃えるため)"
+else
+  INTRO_ZOOM_VF=""
+fi
+
 # クロスフェードで重なる合計秒数を求める
 # 新方式では境目の映像は前後の段階から半分ずつ供出されるため、
 # 全体としては境目の秒数分だけ尺が縮む
@@ -312,8 +378,10 @@ for ((i=0; i<CLIP_COUNT; i++)); do
         && HAS_HEAD_REST=true
     fi
 
+    # 【重要】導入部にもループと同じ拡大をかける。
+    # 安定化の拡大がループ側にだけ掛かると、切り替わる瞬間に画が一回り大きくなる。
     if ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
-         -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30" \
+         -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
          -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p "intro_tail.mp4" 2>"err_introtail.log" \
        && ffmpeg -y -i "intro_tail.mp4" -i "head_blend_$i.mp4" \
          -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XFADE_INTRO}:offset=0[v]" \
@@ -399,7 +467,7 @@ if [ -n "${INTRO_TRIM:-}" ]; then
   echo "  境目に使った末尾${XFADE_INTRO}秒を導入部から取り除きます(残り${INTRO_TRIM}秒)"
 fi
 ffmpeg -y -i intro_video.mp4 $INTRO_CUT -an \
-  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30" \
+  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
   -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
