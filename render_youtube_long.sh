@@ -6,6 +6,8 @@
 # 構成: 導入部(LTX動画、動きあり) + ループ部分(各段階が短い動画クリップのループ、常に動いている)
 # 引数: $1=導入動画URL $2=BGM URL $3=総尺(秒) $4=導入部秒数 $5=出力ファイル名 $6以降=ループ用の段階動画クリップURL(6本)
 # 環境変数: AMBIENT_SOUND_URL=効果音URL(省略可。省略時はBGMのみ)
+#           PARTICLE_KEY=情景の種類(省略可。音のEQを切り替えるのに使う)
+#           TRANSITIONS=段階間の変化速度(例: "slow,slow,fast")
 # =====================================================
 set -e
 
@@ -26,18 +28,33 @@ echo "BGM: $BGM_URL"
 echo "総尺: ${TOTAL_DURATION}秒 / 導入部: ${INTRO_DURATION}秒"
 echo "ループ段階クリップ数: ${#STAGE_CLIP_URLS[@]}"
 echo "効果音: ${AMBIENT_SOUND_URL:-なし}"
+echo "particleKey: ${PARTICLE_KEY:-未指定}"
 
 # ---- ①素材のダウンロード ----
-echo "導入動画をダウンロード中..."
-curl -L -s -o intro_video.mp4 "$INTRO_VIDEO_URL"
-echo "BGMをダウンロード中..."
-curl -L -s -o bgm.mp3 "$BGM_URL"
+#
+# 【修正】curlに -f を付けた。
+# 以前は -L -s だけだったため、URLが切れていても「404のHTML」を
+# intro_video.mp4 という名前で保存して正常終了してしまい、
+# 数ステップ先のffmpegが意味不明なエラーで落ちて原因が追えなかった。
+# -f を付ければ、その場でダウンロード失敗として止まる。
+download_or_die_() {
+  local url="$1" out="$2" label="$3"
+  echo "${label}をダウンロード中..."
+  if ! curl -fL -sS --retry 2 --retry-delay 3 -o "$out" "$url"; then
+    echo "エラー: ${label}のダウンロードに失敗しました"
+    echo "  URL: $url"
+    echo "  Driveの共有設定が「リンクを知っている全員」になっているか確認してください"
+    exit 1
+  fi
+}
+
+download_or_die_ "$INTRO_VIDEO_URL" intro_video.mp4 "導入動画"
+download_or_die_ "$BGM_URL" bgm.mp3 "BGM"
 
 # 効果音のダウンロード(URLが指定されている場合のみ)
 HAS_AMBIENT=false
 if [ -n "$AMBIENT_SOUND_URL" ] && [ "$AMBIENT_SOUND_URL" != "none" ]; then
-  echo "効果音をダウンロード中..."
-  curl -L -s -o ambient.mp3 "$AMBIENT_SOUND_URL"
+  download_or_die_ "$AMBIENT_SOUND_URL" ambient.mp3 "効果音"
   HAS_AMBIENT=true
 fi
 
@@ -56,7 +73,7 @@ fi
 
 echo "ループ用の段階動画クリップをダウンロード中...(${CLIP_COUNT}本)"
 for i in "${!STAGE_CLIP_URLS[@]}"; do
-  curl -L -s -o "stage_clip_raw_$i.mp4" "${STAGE_CLIP_URLS[$i]}"
+  download_or_die_ "${STAGE_CLIP_URLS[$i]}" "stage_clip_raw_$i.mp4" "クリップ$((i+1))"
 done
 
 # ---- ①-2 クリップの再生速度を落とす ----
@@ -70,7 +87,7 @@ done
 # 湯気や水面もあわせてゆっくりになるが、放置動画では
 # むしろ落ち着いて見えるので都合がよい。
 #
-# 副産物として、6秒のクリップが10秒に伸びるためループ周期も長くなり、
+# 副産物として、6秒のクリップが15秒に伸びるためループ周期も長くなり、
 # 「同じ映像の繰り返し」に気づかれにくくなる。
 #
 # 【vidstabによる安定化は廃止した】
@@ -83,6 +100,7 @@ done
 #   0.4  … 6秒→15秒。雲の動きが1/3以下になり、導入部との差がほぼ分からなくなる
 #          湯気や水面もゆっくりになるが、放置動画ではむしろ落ち着いて見える
 LOOP_SPEED=0.4
+
 # 【診断用】導入部とループクリップの解像度を記録しておく
 # 両者の縦横比が違うと、画面に収める際の拡大率が変わり、
 # 切り替わる瞬間に画が広がったように見えてしまう
@@ -98,13 +116,14 @@ echo "ループクリップの再生速度を${LOOP_SPEED}倍に落とします(
 for ((i=0; i<CLIP_COUNT; i++)); do
   if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
        -vf "setpts=PTS/${LOOP_SPEED},fps=30" -an \
-       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "stage_clip_$i.mp4" 2>/dev/null; then
+       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed_$i.log"; then
     RAW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_raw_$i.mp4")
     NEW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
     echo "  クリップ$((i+1)): ${RAW_DUR}秒 → ${NEW_DUR}秒"
   else
     cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
     echo "  クリップ$((i+1)): 速度変更に失敗したため、そのまま使います"
+    tail -3 "err_speed_$i.log" || true
   fi
 done
 
@@ -113,16 +132,17 @@ done
 # 6秒のクリップをそのまま繰り返すと、最後のフレームから最初のフレームへ
 # 一瞬で切り替わるため、位置や湯気の形の差が「カクッ」という違和感になる。
 #
-# そこで末尾1秒と先頭1秒をクロスフェードで溶かし合わせ、
-# 「終わりの画=始まりの画」となる5秒の完全ループを作る。
+# そこで末尾と先頭をクロスフェードで溶かし合わせ、
+# 「終わりの画=始まりの画」となる完全ループを作る。
 #
-#   [1〜5秒の本体][末尾1秒が先頭1秒へ溶けていく]
+#   [本体][末尾が先頭へ溶けていく]
 #    → 継ぎ目が原理的に存在しなくなる
 #
 # 湯気・水面・星の瞬きは形の定まらない被写体なので、
-# 1秒のディゾルブは自然な動きにしか見えない。
+# 数秒のディゾルブは自然な動きにしか見えない。
 # カメラのドリフトが残っていても、跳ぶのではなく柔らかく溶けるため目立たない。
-# ループの継ぎ目、および導入部との境目を溶かす秒数
+#
+# ループの継ぎ目を溶かす秒数
 # 長いほど繋ぎ目が分かりにくくなるが、その分ループ周期が短くなる
 XFADE_LOOP=3
 
@@ -133,6 +153,7 @@ XFADE_LOOP=3
 # 動かないまま居座り、「残像」として見えてしまう。
 # 1秒程度なら、残像と認識される前に切り替わりが終わる。
 XFADE_INTRO=1
+
 echo "クリップをシームレスループに加工します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   CLIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
@@ -144,7 +165,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
 [0:v]trim=start=0:end=${XFADE_LOOP},setpts=PTS-STARTPTS[head];\
 [tail][head]xfade=transition=fade:duration=${XFADE_LOOP}:offset=0[wrap];\
 [main][wrap]concat=n=2:v=1[out]" \
-      -map "[out]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_loop_$i.mp4" 2>/dev/null; then
+      -map "[out]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_loop_$i.mp4" 2>"err_loop_$i.log"; then
     LOOP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_loop_$i.mp4")
     echo "  クリップ$((i+1)): シームレスループ化しました(${CLIP_DUR}秒 → ${LOOP_DUR}秒)"
 
@@ -152,14 +173,15 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     # 導入部の最終フレームは元の0秒地点なので、そのまま繋ぐと
     # 切り替わった瞬間に${XFADE_LOOP}秒分の動きが飛んでしまう。
     # そこで元の0〜${XFADE_LOOP}秒を別に取っておき、ループの一番最初にだけ挟む。
-    #   [導入部 …元の0秒][元の0〜1秒][加工済みループ(1秒地点から)]…
+    #   [導入部 …元の0秒][元の0〜3秒][加工済みループ(3秒地点から)]…
     # こうすれば全ての繋ぎ目が連続する。
     ffmpeg -y -i "stage_clip_$i.mp4" -t "$XFADE_LOOP" \
-      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "loop_head_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "loop_head_$i.mp4" 2>"err_head_$i.log"
 
     mv "stage_loop_$i.mp4" "stage_clip_$i.mp4"
   else
     echo "  クリップ$((i+1)): 加工に失敗したため、そのまま使います"
+    tail -3 "err_loop_$i.log" || true
   fi
 done
 
@@ -188,7 +210,24 @@ for ((b=0; b<BOUNDARY_COUNT; b++)); do
     XFADE_DURATIONS+=("$XFADE_SLOW")
   fi
 done
-echo "境目ごとの変化速度: ${XFADE_DURATIONS[*]}"
+echo "境目ごとの変化速度: ${XFADE_DURATIONS[*]:-なし(段階が1つのみ)}"
+
+# 【修正】段階が2つ以上あるときだけ、キーフレーム間隔を0.5秒に詰める。
+#
+# 後の工程で本体部分を `-ss 秒数 -c copy` で切り出すが、
+# 再エンコードしない切り出しは直前のキーフレームまで戻ってしまう。
+# 既定のキーフレーム間隔(250フレーム≒8秒)のままだと、
+# 境目の位置が最大8秒ずれて繋ぎ目が破綻する。
+# 0.5秒間隔なら、境目に使う1.5秒・12秒がどちらもキーフレーム上に乗る。
+#
+# 間隔を詰めるとファイルが1〜2割大きくなるため、
+# 切り出しが発生しない1段階のときは既定のままにしておく(Releaseの2GB制限対策)。
+if [ "$CLIP_COUNT" -gt 1 ]; then
+  GOP_OPTS="-g 15 -keyint_min 15 -sc_threshold 0"
+  echo "キーフレーム間隔を0.5秒に設定します(境目の切り出しを正確にするため)"
+else
+  GOP_OPTS=""
+fi
 
 # クロスフェードで重なる合計秒数を求める
 # 新方式では境目の映像は前後の段階から半分ずつ供出されるため、
@@ -219,6 +258,11 @@ echo "ループ部分: ${LOOP_DURATION}秒 / 1段階あたり: ${STAGE_DURATION}
 #   先頭の段階  : 後ろの境目にだけ尺を取られる
 #   中間の段階  : 前後の境目に尺を取られる
 #   最後の段階  : 前の境目にだけ尺を取られる
+#
+# 【修正】このブロックのffmpegから 2>/dev/null を外した。
+# set -e が効いているため、失敗すると即座にスクリプトが終了するが、
+# 標準エラーを捨てていたせいで何のメッセージも残らず、
+# 40分の処理の途中で無言で死ぬ状態になっていた。
 echo "各段階の動画を用意します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   BEFORE=0
@@ -229,7 +273,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   # この段階が必要とする総尺(本体 + 前後の境目に供出する分)
   #
   # 最初の段階だけは、導入部との繋ぎ目を連続させるため
-  # 「元の0〜1秒」を先頭に挟んでからループさせる
+  # 「元の0〜3秒」を先頭に挟んでからループさせる
   if [ "$i" -eq 0 ] && [ -f "loop_head_$i.mp4" ]; then
     # 【導入部との境目を溶かす】
     #
@@ -242,10 +286,10 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     BODY_LEN=$(awk "BEGIN{print $STAGE_DURATION - $XFADE_LOOP}")
     ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$BODY_LEN" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_body_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_body_$i.mp4"
     ffmpeg -y -i "loop_head_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4"
 
     # 導入部の末尾を切り出して、ループの先頭と溶かし合わせる
     #
@@ -260,20 +304,20 @@ for ((i=0; i<CLIP_COUNT; i++)); do
 
     # ループ先頭部分を「境目で溶かす分」と「そのまま流す分」に分ける
     ffmpeg -y -i "stage_headpart_$i.mp4" -t "$XFADE_INTRO" \
-      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "head_blend_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_blend_$i.mp4"
     HAS_HEAD_REST=false
     if awk "BEGIN{exit !($HEAD_REST > 0.05)}"; then
       ffmpeg -y -ss "$XFADE_INTRO" -i "stage_headpart_$i.mp4" \
-        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "head_rest_$i.mp4" 2>/dev/null \
+        -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_rest_$i.mp4" \
         && HAS_HEAD_REST=true
     fi
 
     if ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
          -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30" \
-         -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "intro_tail.mp4" 2>/dev/null \
+         -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p "intro_tail.mp4" 2>"err_introtail.log" \
        && ffmpeg -y -i "intro_tail.mp4" -i "head_blend_$i.mp4" \
          -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XFADE_INTRO}:offset=0[v]" \
-         -map "[v]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "boundary.mp4" 2>/dev/null; then
+         -map "[v]" -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "boundary.mp4" 2>"err_boundary.log"; then
       if [ "$HAS_HEAD_REST" = true ]; then
         printf "file 'boundary.mp4'\nfile 'head_rest_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
       else
@@ -284,12 +328,13 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     else
       printf "file 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
       echo "  段階1: 境目の加工に失敗したため、そのまま繋ぎます"
+      tail -3 err_introtail.log err_boundary.log 2>/dev/null || true
     fi
-    ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4" 2>/dev/null
+    ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4"
   else
     ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_$i.mp4"
   fi
 
   # 境目に使う部分を切り出す
@@ -298,17 +343,19 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   if [ "$(awk "BEGIN{print ($AFTER > 0)}")" = "1" ]; then
     TAIL_START=$(awk "BEGIN{print $STAGE_DURATION - $AFTER}")
     ffmpeg -y -ss "$TAIL_START" -i "stage_$i.mp4" -t "$AFTER" \
-      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "tail_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "tail_$i.mp4"
   fi
   if [ "$(awk "BEGIN{print ($BEFORE > 0)}")" = "1" ]; then
     ffmpeg -y -i "stage_$i.mp4" -t "$BEFORE" \
-      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "head_$i.mp4" 2>/dev/null
+      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_$i.mp4"
   fi
 
   # 本体部分(境目に供出した分を除いた中間部分)を切り出す
+  # 再エンコードしないので速いが、切り出し位置はキーフレームに丸められる。
+  # そのため上で GOP_OPTS によりキーフレーム間隔を0.5秒に詰めてある。
   BODY_DURATION=$(awk "BEGIN{print $STAGE_DURATION - $BEFORE - $AFTER}")
   ffmpeg -y -ss "$BEFORE" -i "stage_$i.mp4" -t "$BODY_DURATION" \
-    -c copy "body_$i.mp4" 2>/dev/null
+    -c copy "body_$i.mp4"
 done
 
 # ---- ④境目だけクロスフェードを作り、本体と交互に連結する ----
@@ -323,7 +370,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     echo "  段階$((i+1))→$((i+2)): ${XF}秒のクロスフェード"
     ffmpeg -y -i "tail_$i.mp4" -i "head_$((i+1)).mp4" \
       -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XF}:offset=0[v]" \
-      -map "[v]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "xfade_$i.mp4" 2>/dev/null
+      -map "[v]" -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "xfade_$i.mp4"
     echo "file 'xfade_$i.mp4'" >> concat_loop.txt
   fi
 done
@@ -334,9 +381,6 @@ ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
 echo "ループ部分の結合が完了しました"
 
 # ---- ⑤導入部とループ部分をつなげる(映像のみ、音声は後で合成) ----
-#      ※ここはクロスフェードしない。導入部の最終フレームがstage1画像そのものなので、
-#        単純に連結するだけで自然につながる(溶かすとかえって不自然になる)
-#
 #      【重要】導入部とループ部分で解像度やフレームレートが違うと、
 #      連結した動画の途中で画角が変わってしまう。
 #      以前は導入部を -c:v copy でそのまま使っていたためこの問題が起きていた。
@@ -350,11 +394,13 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 INTRO_CUT=""
 if [ -n "${INTRO_TRIM:-}" ]; then
   INTRO_CUT="-t $INTRO_TRIM"
-  echo "  境目に使った末尾${XFADE_LOOP}秒を導入部から取り除きます"
+  # 【修正】以前はここで XFADE_LOOP(3秒)と表示していたが、
+  # 実際に取り除いているのは XFADE_INTRO(1秒)分。表示が実態と食い違っていた。
+  echo "  境目に使った末尾${XFADE_INTRO}秒を導入部から取り除きます(残り${INTRO_TRIM}秒)"
 fi
 ffmpeg -y -i intro_video.mp4 $INTRO_CUT -an \
   -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30" \
-  -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p intro_video_noaudio.mp4
+  -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
@@ -372,31 +418,17 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 #   0秒〜         : 効果音のみ。まだ室内にいるので、外の音は控えめに聴こえている
 #   BGM_FADE_START: BGMが立ち上がり始める(戸へ向かって歩き出すあたり)
 #   INTRO_DURATION: 外に出た時点では音楽が満ちており、景色と一緒に音楽を味わえる
-#
-#   完全な無音から始めると唐突なので、冒頭から効果音を敷いておく。
-#   効果音は導入部では強め(0.9)、ループ部分に入ったら控えめ(0.25)に下げてBGMを立たせる。
 
 # BGMのフェードインを始める時刻
 #
-# 外に出て景色が開ける瞬間に音楽が満ちている状態にしたいので、
-# 導入部の終わる少し前から立ち上げ始め、終わりまでに全開になるよう逆算する。
-#   導入部20秒の場合: 13秒から立ち上がり、18秒で全開、20秒で外に出る
+# ※効果音がある場合は、下の「空間変化」方式が優先される。
+#   この値は空間変化に失敗したときのフォールバックと、BGMのみの場合に使う。
 BGM_FADE_DURATION=5
 BGM_FADE_START=$(awk "BEGIN{v=$INTRO_DURATION-7; if(v<0) v=0; print v}")
-echo "BGMフェードイン: ${BGM_FADE_START}秒から${BGM_FADE_DURATION}秒かけて立ち上げ(導入部は${INTRO_DURATION}秒)"
 
 # 効果音あり・なしで処理を分岐する
 if [ "$HAS_AMBIENT" = true ]; then
   echo "効果音+BGMの合成を行います(帯域を棲み分けてミックス)..."
-
-  # 【設計根拠】
-  # 雨や風などの自然音はピンクノイズ特性を持ち、低域(特に500Hz以下)にエネルギーが集中している。
-  # そのためBGMの低域をそのまま重ねると両方が濁る。
-  # BGM側は250Hz以下をハイパスで削り、中高域だけを残して環境音の上に浮かせる。
-  #
-  # 一方で環境音(特に風)は中高域まで帯域が広く、BGMの居場所を奪って
-  # 「2つの音が別々に鳴っている」状態になりやすい。
-  # そこで環境音側の高域を大きく削り、遠景に退かせることで音楽と溶け合わせる。
 
   # 【設計】BGMと環境音が「別々に鳴っている」状態を避けるための処理
   #
@@ -409,6 +441,9 @@ if [ "$HAS_AMBIENT" = true ]; then
   #           BGM側の低域を削る必要はなく、むしろ低〜中低域を残して土台にする。
   #           代わりに水の弾ける音が聴こえるよう、BGMの2〜5kHzを少し下げる。
   #           環境音側は80Hz以下を削り、BGMのパッドをクリアに響かせる。
+  #
+  # ※PARTICLE_KEY は render.yml から環境変数として渡される。
+  #   未指定のときは雨・波向けの設定(*)になる。
 
   case "$PARTICLE_KEY" in
     onsen)
@@ -473,11 +508,12 @@ if [ "$HAS_AMBIENT" = true ]; then
       "[0:a]afade=t=out:st=0:d=${BGM_OPENING}:curve=tri[ind];\
 [1:a]afade=t=in:st=0:d=${BGM_OPENING}:curve=tri[outd];\
 [ind][outd]amix=inputs=2:duration=longest:normalize=0[out]" \
-      -map "[out]" -c:a pcm_s16le bgm_full.wav 2>/dev/null; then
+      -map "[out]" -c:a pcm_s16le bgm_full.wav 2>err_bgmspace.log; then
     echo "BGMに空間変化を適用しました(室内では編成が薄く聴こえます)"
     rm -f bgm_indoor.wav bgm_outdoor.wav
   else
     echo "空間変化の適用に失敗したため、従来のフェードインで処理します"
+    tail -3 err_bgmspace.log || true
     ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
       -af "${BGM_EQ},afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},volume=0.8" \
       -c:a pcm_s16le bgm_full.wav
@@ -497,8 +533,6 @@ if [ "$HAS_AMBIENT" = true ]; then
   # 「遠い音」と「近い音」を別々に作り、導入部の長さをかけて入れ替える。
   #   遠い音 … 1.2kHz以上を落としてこもらせ、音量も小さく
   #   近い音 … 8kHzまで開けて水の弾ける音まで聴こえる、通常音量
-  # (volumeやlowpassに時間の式を書く方法もあるが、lowpassは動的な
-  #  周波数指定に対応していないため、2つ作って混ぜる方式にしている)
   DIST_FAR_VOL=$(awk "BEGIN{printf \"%.3f\", $AMBIENT_LOOP_VOLUME * 0.28}")
   echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${INTRO_DURATION}秒 → 近(${AMBIENT_LOOP_VOLUME}/開け)"
 
@@ -517,12 +551,13 @@ if [ "$HAS_AMBIENT" = true ]; then
       "[0:a]afade=t=out:st=0:d=${INTRO_DURATION}:curve=tri[far];\
 [1:a]afade=t=in:st=0:d=${INTRO_DURATION}:curve=tri[near];\
 [far][near]amix=inputs=2:duration=longest:normalize=0[out]" \
-      -map "[out]" -c:a pcm_s16le ambient_full.wav 2>/dev/null; then
+      -map "[out]" -c:a pcm_s16le ambient_full.wav 2>err_ambdist.log; then
     echo "効果音に距離変化を適用しました"
     rm -f ambient_far.wav ambient_near.wav
   else
     # 失敗した場合は一定音量で処理する
     echo "距離変化の適用に失敗したため、一定音量で処理します"
+    tail -3 err_ambdist.log || true
     ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
       -af "${AMBIENT_EQ_BASE},lowpass=f=${AMBIENT_LOWPASS},volume=${AMBIENT_LOOP_VOLUME}" \
       -c:a pcm_s16le ambient_full.wav
@@ -533,19 +568,22 @@ if [ "$HAS_AMBIENT" = true ]; then
   #   (別々に鳴っている感じを減らし、ひとつの音像として聴かせる)
   ffmpeg -y -i bgm_full.wav -i ambient_full.wav \
     -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[mixed];[mixed]acompressor=threshold=0.15:ratio=3:attack=200:release=1000[aout]" \
-    -map "[aout]" -c:a aac full_audio.aac
+    -map "[aout]" -c:a aac -b:a 192k full_audio.aac
 
 else
   echo "BGMのみで音声合成を行います..."
+  echo "BGMフェードイン: ${BGM_FADE_START}秒から${BGM_FADE_DURATION}秒かけて立ち上げ(導入部は${INTRO_DURATION}秒)"
 
   # BGM: ループして、窓へ向かうあたりからフェードイン
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
     -af "afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION}" \
-    -c:a aac full_audio.aac
+    -c:a aac -b:a 192k full_audio.aac
 fi
 
 # ---- ⑦映像と音声を結合 ----
+# 【修正】音声は既にAACなので再エンコードせずコピーする(二重エンコードによる劣化を避ける)
 ffmpeg -y -i full_video_noaudio.mp4 -i full_audio.aac \
-  -map 0:v -map 1:a -c:v copy -c:a aac -shortest "$OUTPUT_FILE"
+  -map 0:v -map 1:a -c:v copy -c:a copy -shortest "$OUTPUT_FILE"
 
 echo "=== レンダリング完了: $OUTPUT_FILE ==="
+ls -la "$OUTPUT_FILE"
