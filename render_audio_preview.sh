@@ -18,10 +18,24 @@ echo "=== 音声ミックス試聴版の作成 ==="
 echo "particleKey: $PARTICLE_KEY / 長さ: ${DURATION}秒"
 
 # ---- ①素材のダウンロード ----
-echo "BGMをダウンロードします..."
-curl -sL "$BGM_URL" -o bgm.mp3
-echo "効果音をダウンロードします..."
-curl -sL "$AMBIENT_URL" -o ambient.mp3
+#
+# 【修正】curlに -f を付けた。
+# 以前は -sL だけだったため、URLが切れていても「404のHTML」を
+# bgm.mp3 という名前で保存して正常終了してしまい、
+# 次のffmpegが意味不明なエラーで落ちて原因が追えなかった。
+download_or_die_() {
+  local url="$1" out="$2" label="$3"
+  echo "${label}をダウンロードします..."
+  if ! curl -fL -sS --retry 2 --retry-delay 3 -o "$out" "$url"; then
+    echo "エラー: ${label}のダウンロードに失敗しました"
+    echo "  URL: $url"
+    echo "  Driveの共有設定が「リンクを知っている全員」になっているか確認してください"
+    exit 1
+  fi
+}
+
+download_or_die_ "$BGM_URL" bgm.mp3 "BGM"
+download_or_die_ "$AMBIENT_URL" ambient.mp3 "効果音"
 
 # ---- ②本番と同じ設定でミックス ----
 # 【設計根拠】render_youtube_long.sh と同一の設定
@@ -149,7 +163,7 @@ PYEOF
   echo "------------------"
 else
   echo "音質評価をスキップしました(音声ファイルは正常に作成されています)"
-  cat eval_error.log 2>/dev/null | tail -5
+  tail -5 eval_error.log 2>/dev/null || true
   echo "音質評価は実行されませんでした" > score_summary.txt
 fi
 
