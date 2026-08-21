@@ -134,7 +134,11 @@ jobs:
             exit 0
           fi
 
-          gh release create "${{ steps.params.outputs.tag }}" "${{ steps.params.outputs.tag }}.mp4" tiktokqKDPIBl5H1NvLbGlMCi1MU6K3bKB5wb9.txt \
+          # 【修正】以前はTikTokのドメイン認証ファイルも一緒に添付していたが、
+          # そのファイルがリポジトリ直下にないとコマンドごと失敗し、
+          # continue-on-error で握りつぶされて video_url が空になっていた。
+          # 認証ファイルはRelease経由で配る必要がないので添付をやめる。
+          gh release create "${{ steps.params.outputs.tag }}" "${{ steps.params.outputs.tag }}.mp4" \
             --title "放置動画 ${{ steps.params.outputs.tag }}" \
             --notes "自動生成された動画"
           URL="https://github.com/${{ github.repository }}/releases/download/${{ steps.params.outputs.tag }}/${{ steps.params.outputs.tag }}.mp4"
@@ -302,22 +306,26 @@ jobs:
           #   2. 導入部の終わり … ループへの切り替わり
           #   3. 中盤        … ループ部分(カメラ固定が正常)
           #
-          # 3つ目はループのちょうど1周期(クリップと同じ6秒)を切り出す。
-          # 周期をまたぐと「戻る」瞬間が含まれてしまい、カメラ移動の判定がつきにくくなる。
+          # 【修正】3つ目はループのちょうど1周期を切り出す。
+          # 以前は6秒だけ切り出していたが、実際の繰り返し周期は12秒なので
+          # 半周期しか映らず、ループの継ぎ目そのものが検品対象から外れていた。
+          #
+          # 周期の内訳: クリップは6秒で生成 → 再生速度0.4倍で15秒 →
+          #             シームレスループ加工で末尾3秒が先頭に溶けるため、繰り返し周期は12秒
+          # (render_youtube_long.sh の LOOP_SPEED / XFADE_LOOP を変えたらここも直すこと)
+          LOOP_PERIOD=12
+
           INTRO_END=$((INTRO_DURATION - 3))
           if [ "$INTRO_END" -lt 0 ]; then INTRO_END=0; fi
           MID=$((DURATION_INT / 2))
-          # ループ周期の切れ目に合わせる
-          # (クリップは6秒で生成 → 再生速度0.4倍で15秒 →
-          #  シームレスループ加工で末尾3秒が先頭に溶けるため、繰り返し周期は12秒)
-          LOOP_PERIOD=12
+          # ループ周期の切れ目に合わせる(周期の途中から切ると継ぎ目の位置がずれるため)
           MID=$(( INTRO_DURATION + ((MID - INTRO_DURATION) / LOOP_PERIOD) * LOOP_PERIOD ))
 
-          echo "動画チェック用のクリップを切り出します(全体${DURATION_INT}秒)"
-          echo "  1つ目: 3秒〜(導入部) / 2つ目: ${INTRO_END}秒〜(境目) / 3つ目: ${MID}秒〜(ループ部分)"
+          echo "動画チェック用のクリップを切り出します(全体${DURATION_INT}秒 / ループ周期${LOOP_PERIOD}秒)"
+          echo "  1つ目: 3秒〜(導入部) / 2つ目: ${INTRO_END}秒〜(境目) / 3つ目: ${MID}秒〜(ループ部分・1周期分)"
           ffmpeg -y -ss 3 -i "$VIDEO" -t 6 -vf "scale=640:-2" -an -c:v libx264 -preset veryfast clip_1.mp4 2>/dev/null
           ffmpeg -y -ss "$INTRO_END" -i "$VIDEO" -t 6 -vf "scale=640:-2" -an -c:v libx264 -preset veryfast clip_2.mp4 2>/dev/null
-          ffmpeg -y -ss "$MID" -i "$VIDEO" -t 6 -vf "scale=640:-2" -an -c:v libx264 -preset veryfast clip_3.mp4 2>/dev/null
+          ffmpeg -y -ss "$MID" -i "$VIDEO" -t "$LOOP_PERIOD" -vf "scale=640:-2" -an -c:v libx264 -preset veryfast clip_3.mp4 2>/dev/null
           ls -la clip_*.mp4
 
           cat << 'PYEOF' > check_video.py
@@ -346,14 +354,18 @@ jobs:
           【各場面の位置づけ】
           1つ目 = 導入部。カメラが室内を歩いて外へ出ていく場面。カメラが動くのが正常。
           2つ目 = 導入部からループ部分へ切り替わる境目。
-          3つ目 = ループ部分。同じ6秒の映像を延々と繰り返す場面。
+          3つ目 = ループ部分。同じ12秒の映像を延々と繰り返す場面。
+                  切り出したのはちょうど1周期分なので、最初と最後がほぼ同じ画になっているはずです。
                   カメラは三脚に固定されているべきで、1ミリも動いてはいけない。
 
           【最重要】3つ目のカメラ移動を厳しく見てください
-          この場面は6秒ごとに同じ映像が繰り返されます。
-          もしカメラがゆっくり動いていると、6秒ごとに元の位置へ戻る動きが生まれ、
+          この場面は12秒ごとに同じ映像が繰り返されます。
+          もしカメラがゆっくり動いていると、12秒ごとに元の位置へ戻る動きが生まれ、
           視聴者には「カクッと戻る」不自然な繰り返しとして見えてしまいます。
           そのため、ごくわずかな移動でも必ず報告してください。
+
+          あわせて、ループの継ぎ目(末尾から先頭へ戻るところ)が滑らかに溶けているか、
+          二重像や不自然な飛びがないかも確認してください。
 
           最初のフレームと最後のフレームを見比べて、
           画面の端に写っているものの位置が変わっていないか確認してください。
