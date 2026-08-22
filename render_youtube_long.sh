@@ -208,6 +208,14 @@ XFADE_LOOP=3
 # 1秒程度なら、残像と認識される前に切り替わりが終わる。
 XFADE_INTRO=1
 
+# 導入部の冒頭から切り落とす秒数
+#
+# LTXは生成の最初の数秒で急旋回し、強いモーションブラーを出すことがある。
+# ここが視聴者に画面酔いを起こさせる原因になるため、物理的に捨てる。
+#   0   … 切らない(以前の挙動)
+#   3   … 冒頭3秒を捨てる(急旋回はほぼこの範囲に収まる)
+INTRO_HEAD_CUT=3
+
 echo "クリップをシームレスループに加工します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   CLIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
@@ -366,6 +374,8 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     # そのため境目だけを短くして、残像として認識される前に切り替え終える。
     INTRO_REAL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video.mp4)
     TAIL_FROM=$(awk "BEGIN{v=$INTRO_REAL - $XFADE_INTRO; if(v<0) v=0; print v}")
+    # 冒頭カットぶんを差し引いた、実際に使う導入部の長さ
+    INTRO_USED=$(awk "BEGIN{v=$INTRO_REAL - $INTRO_HEAD_CUT; if(v<1) v=$INTRO_REAL; print v}")
     HEAD_REST=$(awk "BEGIN{print $XFADE_LOOP - $XFADE_INTRO}")
 
     # ループ先頭部分を「境目で溶かす分」と「そのまま流す分」に分ける
@@ -457,16 +467,29 @@ echo "導入部をループ部分と同じ規格に揃えます..."
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate \
   -of default=nw=1 intro_video.mp4 || true
 
+# ---- 冒頭の急旋回を切り落とす ----
+#
+# LTXが生成の最初の数秒で急旋回し、強いモーションブラーを出すため、
+# その区間を物理的に捨てる(プロンプトでは2回連続で抑えられなかった)。
+# -ss は -i より前に置くと高速シークになるが、再エンコードするので精度は問題ない。
+INTRO_SS=""
+if awk "BEGIN{exit !($INTRO_HEAD_CUT > 0.05)}"; then
+  INTRO_SS="-ss $INTRO_HEAD_CUT"
+  echo "  冒頭${INTRO_HEAD_CUT}秒を切り落とします(急旋回とモーションブラー対策)"
+fi
+
 # 境目を溶かした場合、その分は既にループ側の先頭に含まれているため
 # 導入部からは末尾を取り除いておく(重複を避ける)
+#
+# 【注意】-ss で冒頭を飛ばした場合、-t は「そこからの長さ」になる。
+# そのため末尾を取り除く長さも、冒頭カットぶんを差し引いて計算する。
 INTRO_CUT=""
 if [ -n "${INTRO_TRIM:-}" ]; then
-  INTRO_CUT="-t $INTRO_TRIM"
-  # 【修正】以前はここで XFADE_LOOP(3秒)と表示していたが、
-  # 実際に取り除いているのは XFADE_INTRO(1秒)分。表示が実態と食い違っていた。
-  echo "  境目に使った末尾${XFADE_INTRO}秒を導入部から取り除きます(残り${INTRO_TRIM}秒)"
+  INTRO_KEEP=$(awk "BEGIN{v=$INTRO_TRIM - $INTRO_HEAD_CUT; if(v<1) v=$INTRO_TRIM; print v}")
+  INTRO_CUT="-t $INTRO_KEEP"
+  echo "  境目に使った末尾${XFADE_INTRO}秒を導入部から取り除きます(実際に使う導入部: ${INTRO_KEEP}秒)"
 fi
-ffmpeg -y -i intro_video.mp4 $INTRO_CUT -an \
+ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
   -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
   -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
@@ -491,8 +514,13 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 #
 # ※効果音がある場合は、下の「空間変化」方式が優先される。
 #   この値は空間変化に失敗したときのフォールバックと、BGMのみの場合に使う。
+# 冒頭カット後、実際に画面に出る導入部の長さ
+# 音の切り替わり(室内→屋外)はこの秒数に合わせる
+INTRO_EFFECTIVE=$(awk "BEGIN{v=$INTRO_DURATION - $INTRO_HEAD_CUT; if(v<3) v=$INTRO_DURATION; print v}")
+echo "音のタイミング基準: ${INTRO_EFFECTIVE}秒(指定${INTRO_DURATION}秒 − 冒頭カット${INTRO_HEAD_CUT}秒)"
+
 BGM_FADE_DURATION=5
-BGM_FADE_START=$(awk "BEGIN{v=$INTRO_DURATION-7; if(v<0) v=0; print v}")
+BGM_FADE_START=$(awk "BEGIN{v=$INTRO_EFFECTIVE-7; if(v<0) v=0; print v}")
 
 # 効果音あり・なしで処理を分岐する
 if [ "$HAS_AMBIENT" = true ]; then
@@ -558,7 +586,7 @@ if [ "$HAS_AMBIENT" = true ]; then
   #   こもった版と開けた版を別々に作って入れ替える。
   BGM_INDOOR_LOWPASS=1800    # 室内で残す帯域の上限(下げるほど編成が薄く聴こえる)
   BGM_INDOOR_VOLUME=0.32     # 室内でのBGM音量(屋外は0.8)
-  BGM_OPENING=$(awk "BEGIN{v=$INTRO_DURATION; if(v<3) v=3; print v}")
+  BGM_OPENING=$(awk "BEGIN{v=$INTRO_EFFECTIVE; if(v<3) v=3; print v}")
   echo "BGMの空間変化: 室内(${BGM_INDOOR_LOWPASS}Hz以下・音量${BGM_INDOOR_VOLUME}) → ${BGM_OPENING}秒かけて屋外へ開く"
 
   # 室内で聴こえている状態(こもって、響いて、控えめ)
@@ -602,7 +630,7 @@ if [ "$HAS_AMBIENT" = true ]; then
   #   遠い音 … 1.2kHz以上を落としてこもらせ、音量も小さく
   #   近い音 … 8kHzまで開けて水の弾ける音まで聴こえる、通常音量
   DIST_FAR_VOL=$(awk "BEGIN{printf \"%.3f\", $AMBIENT_LOOP_VOLUME * 0.28}")
-  echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${INTRO_DURATION}秒 → 近(${AMBIENT_LOOP_VOLUME}/開け)"
+  echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${INTRO_EFFECTIVE}秒 → 近(${AMBIENT_LOOP_VOLUME}/開け)"
 
   # 遠くで聴こえている状態
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
@@ -616,8 +644,8 @@ if [ "$HAS_AMBIENT" = true ]; then
 
   # 導入部をかけて遠い音から近い音へ入れ替える
   if ffmpeg -y -i ambient_far.wav -i ambient_near.wav -filter_complex \
-      "[0:a]afade=t=out:st=0:d=${INTRO_DURATION}:curve=tri[far];\
-[1:a]afade=t=in:st=0:d=${INTRO_DURATION}:curve=tri[near];\
+      "[0:a]afade=t=out:st=0:d=${INTRO_EFFECTIVE}:curve=tri[far];\
+[1:a]afade=t=in:st=0:d=${INTRO_EFFECTIVE}:curve=tri[near];\
 [far][near]amix=inputs=2:duration=longest:normalize=0[out]" \
       -map "[out]" -c:a pcm_s16le ambient_full.wav 2>err_ambdist.log; then
     echo "効果音に距離変化を適用しました"
@@ -640,7 +668,7 @@ if [ "$HAS_AMBIENT" = true ]; then
 
 else
   echo "BGMのみで音声合成を行います..."
-  echo "BGMフェードイン: ${BGM_FADE_START}秒から${BGM_FADE_DURATION}秒かけて立ち上げ(導入部は${INTRO_DURATION}秒)"
+  echo "BGMフェードイン: ${BGM_FADE_START}秒から${BGM_FADE_DURATION}秒かけて立ち上げ(導入部は${INTRO_EFFECTIVE}秒)"
 
   # BGM: ループして、窓へ向かうあたりからフェードイン
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
