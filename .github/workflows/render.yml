@@ -323,9 +323,14 @@ jobs:
 
           echo "動画チェック用のクリップを切り出します(全体${DURATION_INT}秒 / ループ周期${LOOP_PERIOD}秒)"
           echo "  1つ目: 3秒〜(導入部) / 2つ目: ${INTRO_END}秒〜(境目) / 3つ目: ${MID}秒〜(ループ部分・1周期分)"
-          ffmpeg -y -ss 3 -i "$VIDEO" -t 6 -vf "scale=640:-2" -an -c:v libx264 -preset veryfast clip_1.mp4 2>/dev/null
-          ffmpeg -y -ss "$INTRO_END" -i "$VIDEO" -t 6 -vf "scale=640:-2" -an -c:v libx264 -preset veryfast clip_2.mp4 2>/dev/null
-          ffmpeg -y -ss "$MID" -i "$VIDEO" -t "$LOOP_PERIOD" -vf "scale=640:-2" -an -c:v libx264 -preset veryfast clip_3.mp4 2>/dev/null
+          # 【タイムアウト対策】
+          # 以前は640pxで切り出していたが、3本をbase64で送るとGeminiの応答が
+          # 180秒に間に合わず毎回失敗していた。
+          # 480px・15fpsまで落とす。カメラの移動や雨の動きを見るには十分で、
+          # データ量は半分以下になる。
+          ffmpeg -y -ss 3 -i "$VIDEO" -t 6 -vf "scale=480:-2,fps=15" -an -c:v libx264 -preset veryfast -crf 30 clip_1.mp4 2>/dev/null
+          ffmpeg -y -ss "$INTRO_END" -i "$VIDEO" -t 6 -vf "scale=480:-2,fps=15" -an -c:v libx264 -preset veryfast -crf 30 clip_2.mp4 2>/dev/null
+          ffmpeg -y -ss "$MID" -i "$VIDEO" -t "$LOOP_PERIOD" -vf "scale=480:-2,fps=15" -an -c:v libx264 -preset veryfast -crf 30 clip_3.mp4 2>/dev/null
           ls -la clip_*.mp4
 
           cat << 'PYEOF' > check_video.py
@@ -397,15 +402,26 @@ jobs:
               'generationConfig': {'responseMimeType': 'application/json'}
           }
 
-          req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'),
-                                       headers={'Content-Type': 'application/json'})
-          try:
-              with urllib.request.urlopen(req, timeout=180) as res:
-                  body = json.loads(res.read().decode('utf-8'))
-              text = next(p['text'] for p in body['candidates'][0]['content']['parts'] if 'text' in p)
-              result = json.loads(text)
-          except Exception as e:
-              print('動画チェックに失敗しました:', e)
+          # 【タイムアウト対策】
+          # 動画3本の解析はGemini側で時間がかかる。待ち時間を540秒まで延ばし、
+          # それでも落ちた場合は1度だけ作り直して再試行する。
+          # (以前は180秒で毎回タイムアウトし、レビュー結果が常に空だった)
+          result = None
+          for attempt in (1, 2):
+              req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'),
+                                           headers={'Content-Type': 'application/json'})
+              try:
+                  with urllib.request.urlopen(req, timeout=540) as res:
+                      body = json.loads(res.read().decode('utf-8'))
+                  text = next(p['text'] for p in body['candidates'][0]['content']['parts'] if 'text' in p)
+                  result = json.loads(text)
+                  break
+              except Exception as e:
+                  print(f'動画チェック {attempt}回目に失敗しました:', e)
+                  if attempt == 2:
+                      raise SystemExit(0)
+
+          if result is None:
               raise SystemExit(0)
 
           if result.get('ok'):
