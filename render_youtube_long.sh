@@ -519,8 +519,20 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 INTRO_EFFECTIVE=$(awk "BEGIN{v=$INTRO_DURATION - $INTRO_HEAD_CUT; if(v<3) v=$INTRO_DURATION; print v}")
 echo "音のタイミング基準: ${INTRO_EFFECTIVE}秒(指定${INTRO_DURATION}秒 − 冒頭カット${INTRO_HEAD_CUT}秒)"
 
+# ---- 音が「開ける」瞬間 ----
+#
+# 戸を抜けて外に出るのは導入部の終盤なので、その手前まで室内の音を保ち、
+# 最後の OPEN_DURATION 秒で一気に屋外の音へ切り替える。
+#
+# 以前は0秒から導入部いっぱいを使ってじわじわ変化させていたが、
+# 変化がゆるやかすぎて「開けた瞬間」を感じられなかった。
+OPEN_DURATION=4
+OPEN_START=$(awk "BEGIN{v=$INTRO_EFFECTIVE - $OPEN_DURATION; if(v<1) v=1; print v}")
+echo "音が開ける瞬間: ${OPEN_START}秒から${OPEN_DURATION}秒かけて室内→屋外へ(それまでは室内の音のまま)"
+
 BGM_FADE_DURATION=5
 BGM_FADE_START=$(awk "BEGIN{v=$INTRO_EFFECTIVE-7; if(v<0) v=0; print v}")
+# ※空間変化が使えない環境では、このフェードインだけで室内→屋外を表現する
 
 # 効果音あり・なしで処理を分岐する
 if [ "$HAS_AMBIENT" = true ]; then
@@ -587,7 +599,7 @@ if [ "$HAS_AMBIENT" = true ]; then
   BGM_INDOOR_LOWPASS=1800    # 室内で残す帯域の上限(下げるほど編成が薄く聴こえる)
   BGM_INDOOR_VOLUME=0.32     # 室内でのBGM音量(屋外は0.8)
   BGM_OPENING=$(awk "BEGIN{v=$INTRO_EFFECTIVE; if(v<3) v=3; print v}")
-  echo "BGMの空間変化: 室内(${BGM_INDOOR_LOWPASS}Hz以下・音量${BGM_INDOOR_VOLUME}) → ${BGM_OPENING}秒かけて屋外へ開く"
+  echo "BGMの空間変化: 室内(${BGM_INDOOR_LOWPASS}Hz以下・音量${BGM_INDOOR_VOLUME}) → ${OPEN_START}秒から${OPEN_DURATION}秒で屋外へ開く"
 
   # 室内で聴こえている状態(こもって、響いて、控えめ)
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
@@ -601,8 +613,8 @@ if [ "$HAS_AMBIENT" = true ]; then
 
   # 導入部をかけて室内の響きから屋外の響きへ入れ替える
   if ffmpeg -y -i bgm_indoor.wav -i bgm_outdoor.wav -filter_complex \
-      "[0:a]afade=t=out:st=0:d=${BGM_OPENING}:curve=tri[ind];\
-[1:a]afade=t=in:st=0:d=${BGM_OPENING}:curve=tri[outd];\
+      "[0:a]afade=t=out:st=${OPEN_START}:d=${OPEN_DURATION}:curve=tri[ind];\
+[1:a]afade=t=in:st=${OPEN_START}:d=${OPEN_DURATION}:curve=tri[outd];\
 [ind][outd]amix=inputs=2:duration=longest:normalize=0[out]" \
       -map "[out]" -c:a pcm_s16le bgm_full.wav 2>err_bgmspace.log; then
     echo "BGMに空間変化を適用しました(室内では編成が薄く聴こえます)"
@@ -630,7 +642,7 @@ if [ "$HAS_AMBIENT" = true ]; then
   #   遠い音 … 1.2kHz以上を落としてこもらせ、音量も小さく
   #   近い音 … 8kHzまで開けて水の弾ける音まで聴こえる、通常音量
   DIST_FAR_VOL=$(awk "BEGIN{printf \"%.3f\", $AMBIENT_LOOP_VOLUME * 0.28}")
-  echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${INTRO_EFFECTIVE}秒 → 近(${AMBIENT_LOOP_VOLUME}/開け)"
+  echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${OPEN_START}秒から${OPEN_DURATION}秒で → 近(${AMBIENT_LOOP_VOLUME}/開け)"
 
   # 遠くで聴こえている状態
   ffmpeg -y -stream_loop -1 -i ambient.mp3 -t "$TOTAL_DURATION" \
@@ -644,8 +656,8 @@ if [ "$HAS_AMBIENT" = true ]; then
 
   # 導入部をかけて遠い音から近い音へ入れ替える
   if ffmpeg -y -i ambient_far.wav -i ambient_near.wav -filter_complex \
-      "[0:a]afade=t=out:st=0:d=${INTRO_EFFECTIVE}:curve=tri[far];\
-[1:a]afade=t=in:st=0:d=${INTRO_EFFECTIVE}:curve=tri[near];\
+      "[0:a]afade=t=out:st=${OPEN_START}:d=${OPEN_DURATION}:curve=tri[far];\
+[1:a]afade=t=in:st=${OPEN_START}:d=${OPEN_DURATION}:curve=tri[near];\
 [far][near]amix=inputs=2:duration=longest:normalize=0[out]" \
       -map "[out]" -c:a pcm_s16le ambient_full.wav 2>err_ambdist.log; then
     echo "効果音に距離変化を適用しました"
