@@ -99,7 +99,19 @@ done
 #   0.6  … 6秒→10秒。雲は落ち着くが、導入部のほぼ静止した雲とはまだ差がある
 #   0.4  … 6秒→15秒。雲の動きが1/3以下になり、導入部との差がほぼ分からなくなる
 #          湯気や水面もゆっくりになるが、放置動画ではむしろ落ち着いて見える
-LOOP_SPEED=0.4
+# ループクリップの再生速度
+#
+# 【トレードオフ】
+# 遅くするほどループ周期が長くなり、繰り返し感が減る。
+# しかし遅すぎると、石樋から落ちる水のような速い動きが
+# 止まって見えてしまう(0.4で実際にそうなった)。
+#
+#   0.4 … 周期12.3秒。水が止まって見える
+#   0.6 … 周期7.2秒。水が自然に流れる(現在)
+#
+# ※この値を変えたら render.yml の LOOP_PERIOD も直すこと
+#   (Geminiの動画チェックが1周期分を切り出すのに使っている)
+LOOP_SPEED=0.6
 
 # 【診断用】導入部とループクリップの解像度を記録しておく
 # 両者の縦横比が違うと、画面に収める際の拡大率が変わり、
@@ -145,7 +157,14 @@ done
 #
 # smoothing=0 は「カメラは静止しているはず」という前提で補正するモード。
 # 移動平均で滑らかにするのではなく、ドリフトそのものを打ち消す。
-STABILIZE_ZOOM=8   # 補正で生じる縁の隙間を埋めるための拡大率(%)
+# 【拡大率の調整】
+# 8%では LOOP_SPEED=0.6 のときにドリフトを吸収しきれず、
+# ループの継ぎ目で「カクッと戻る」動きが残った。
+# 速度を上げた分だけ単位時間あたりの移動量も増えるため、拡大率も上げる。
+#   8  … LOOP_SPEED=0.4 のときは足りていた
+#   14 … LOOP_SPEED=0.6 用(現在)
+# 上げるほど確実に消えるが、そのぶん画の周辺が失われる。
+STABILIZE_ZOOM=14   # 補正で生じる縁の隙間を埋めるための拡大率(%)
 
 # ffmpegがvidstabを含まないビルドの場合もあるため、使えるか先に確認する
 # (使えなければ安定化を飛ばす。動画自体は作れる)
@@ -160,10 +179,10 @@ if [ "$HAS_VIDSTAB" = true ]; then
   echo "ループクリップのカメラドリフトを補正します(拡大${STABILIZE_ZOOM}%)..."
   for ((i=0; i<CLIP_COUNT; i++)); do
     if ffmpeg -y -i "stage_clip_$i.mp4" \
-         -vf "vidstabdetect=shakiness=4:accuracy=15:result=transforms_$i.trf" \
+         -vf "vidstabdetect=shakiness=1:accuracy=15:stepsize=2:result=transforms_$i.trf" \
          -f null - 2>"err_vsdetect_$i.log" \
        && ffmpeg -y -i "stage_clip_$i.mp4" \
-         -vf "vidstabtransform=input=transforms_$i.trf:smoothing=0:optzoom=0:zoom=${STABILIZE_ZOOM}:interpol=bicubic" \
+         -vf "vidstabtransform=input=transforms_$i.trf:smoothing=0:optzoom=0:zoom=${STABILIZE_ZOOM}:maxshift=-1:maxangle=-1:crop=black:interpol=bicubic" \
          -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_stab_$i.mp4" 2>"err_vstrans_$i.log"; then
       mv "stage_stab_$i.mp4" "stage_clip_$i.mp4"
       echo "  クリップ$((i+1)): ドリフトを補正しました"
@@ -206,7 +225,10 @@ XFADE_LOOP=3
 # 導入部の終盤はカメラが停止しているため、長く溶かすと二重像が
 # 動かないまま居座り、「残像」として見えてしまう。
 # 1秒程度なら、残像と認識される前に切り替わりが終わる。
-XFADE_INTRO=1
+# 導入部とループの境目を溶かす秒数
+#
+# 1秒だと変化が急で、境目が二重像として見えることがあったため2秒に延ばした。
+XFADE_INTRO=2
 
 # 導入部の冒頭から切り落とす秒数
 #
@@ -215,6 +237,16 @@ XFADE_INTRO=1
 #   0   … 切らない(以前の挙動)
 #   3   … 冒頭3秒を捨てる(急旋回はほぼこの範囲に収まる)
 INTRO_HEAD_CUT=3
+
+# 導入部の末尾から切り落とす秒数
+#
+# LTXは生成の終端でも不安定になり、建物の輪郭がちらついたり
+# 背景がぬるぬる歪んだりする(Geminiから「00:18〜00:20でフリッカーとブレ」と指摘された)。
+# その区間がそのままクロスフェードに使われると、境目のブレとして見えてしまう。
+# 冒頭と同じように、崩れた区間を物理的に捨てる。
+#   0 … 切らない
+#   2 … 末尾2秒を捨てる(推奨)
+INTRO_TAIL_CUT=2
 
 echo "クリップをシームレスループに加工します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
@@ -485,7 +517,11 @@ fi
 # そのため末尾を取り除く長さも、冒頭カットぶんを差し引いて計算する。
 INTRO_CUT=""
 if [ -n "${INTRO_TRIM:-}" ]; then
-  INTRO_KEEP=$(awk "BEGIN{v=$INTRO_TRIM - $INTRO_HEAD_CUT; if(v<1) v=$INTRO_TRIM; print v}")
+  # 冒頭カットぶんに加えて、末尾の崩れた区間も差し引く
+  INTRO_KEEP=$(awk "BEGIN{v=$INTRO_TRIM - $INTRO_HEAD_CUT - $INTRO_TAIL_CUT; if(v<1) v=$INTRO_TRIM - $INTRO_HEAD_CUT; print v}")
+  if awk "BEGIN{exit !($INTRO_TAIL_CUT > 0.05)}"; then
+    echo "  末尾${INTRO_TAIL_CUT}秒も切り落とします(終端のフリッカーとブレ対策)"
+  fi
   INTRO_CUT="-t $INTRO_KEEP"
   echo "  境目に使った末尾${XFADE_INTRO}秒を導入部から取り除きます(実際に使う導入部: ${INTRO_KEEP}秒)"
 fi
@@ -516,8 +552,8 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 #   この値は空間変化に失敗したときのフォールバックと、BGMのみの場合に使う。
 # 冒頭カット後、実際に画面に出る導入部の長さ
 # 音の切り替わり(室内→屋外)はこの秒数に合わせる
-INTRO_EFFECTIVE=$(awk "BEGIN{v=$INTRO_DURATION - $INTRO_HEAD_CUT; if(v<3) v=$INTRO_DURATION; print v}")
-echo "音のタイミング基準: ${INTRO_EFFECTIVE}秒(指定${INTRO_DURATION}秒 − 冒頭カット${INTRO_HEAD_CUT}秒)"
+INTRO_EFFECTIVE=$(awk "BEGIN{v=$INTRO_DURATION - $INTRO_HEAD_CUT - $INTRO_TAIL_CUT; if(v<3) v=$INTRO_DURATION - $INTRO_HEAD_CUT; print v}")
+echo "音のタイミング基準: ${INTRO_EFFECTIVE}秒(指定${INTRO_DURATION}秒 − 冒頭${INTRO_HEAD_CUT}秒 − 末尾${INTRO_TAIL_CUT}秒)"
 
 # ---- 音が「開ける」瞬間 ----
 #
@@ -651,9 +687,19 @@ if [ "$HAS_AMBIENT" = true ]; then
   # 「遠い音」と「近い音」を別々に作り、導入部の長さをかけて入れ替える。
   #   遠い音 … 1.2kHz以上を落としてこもらせ、音量も小さく
   #   近い音 … 8kHzまで開けて水の弾ける音まで聴こえる、通常音量
-  # BGMの室内音量を上げたので、効果音も同じ比率で近づけておく
-  # (BGMだけ上げると、室内で効果音が埋もれて聞こえなくなるため)
-  DIST_FAR_VOL=$(awk "BEGIN{printf \"%.3f\", $AMBIENT_LOOP_VOLUME * 0.45}")
+  # 【BGMと効果音は別扱いにする】
+  #
+  # BGMは冒頭から聞こえてほしい(どのプラットフォームでも掴みが要るため)ので
+  # 室内でも音量を上げてある。
+  #
+  # 一方、効果音は完全な無音から始める。
+  # 導入部の開始位置は建物のいちばん奥で、露天風呂からかなり離れている。
+  # そこで湯の音が聞こえるのは物理的におかしいため、
+  # 戸に近づくにつれて初めて聞こえ始める形にする。
+  #   0.45 … BGMに合わせて上げた値(室内で聞こえすぎた)
+  #   0.18 … 気配は感じる程度。それでも遠すぎる場所では不自然
+  #   0    … 完全な無音から始める(現在)
+  DIST_FAR_VOL=0
   echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${OPEN_START}秒から${OPEN_DURATION}秒で → 近(${AMBIENT_LOOP_VOLUME}/開け)"
 
   # 遠くで聴こえている状態
