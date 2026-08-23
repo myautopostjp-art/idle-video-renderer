@@ -600,8 +600,14 @@ if [ "$HAS_AMBIENT" = true ]; then
   #
   # ※効果音の距離変化と同じ2本方式。lowpassは時間で変化させられないため、
   #   こもった版と開けた版を別々に作って入れ替える。
-  BGM_INDOOR_LOWPASS=1800    # 室内で残す帯域の上限(下げるほど編成が薄く聴こえる)
-  BGM_INDOOR_VOLUME=0.32     # 室内でのBGM音量(屋外は0.8)
+  # 【調整の経緯】
+  # 当初は 1800Hz / 音量0.32 にしていたが、冒頭のBGMが控えめすぎた。
+  # YouTube以外(Shorts・TikTok)にも載せることを考えると、
+  # 冒頭からしっかり音楽が聞こえたほうがよい。
+  # 帯域と音量を上げ、「小さい→大きい」ではなく
+  # 「そこそこ聞こえる→満ちる」という変化にする。
+  BGM_INDOOR_LOWPASS=3000    # 室内で残す帯域の上限(下げるほど編成が薄く聴こえる)
+  BGM_INDOOR_VOLUME=0.55     # 室内でのBGM音量(屋外は0.8)
   BGM_OPENING=$(awk "BEGIN{v=$INTRO_EFFECTIVE; if(v<3) v=3; print v}")
   echo "BGMの空間変化: 室内(${BGM_INDOOR_LOWPASS}Hz以下・音量${BGM_INDOOR_VOLUME}) → ${OPEN_START}秒から${OPEN_DURATION}秒で屋外へ開く"
 
@@ -645,7 +651,9 @@ if [ "$HAS_AMBIENT" = true ]; then
   # 「遠い音」と「近い音」を別々に作り、導入部の長さをかけて入れ替える。
   #   遠い音 … 1.2kHz以上を落としてこもらせ、音量も小さく
   #   近い音 … 8kHzまで開けて水の弾ける音まで聴こえる、通常音量
-  DIST_FAR_VOL=$(awk "BEGIN{printf \"%.3f\", $AMBIENT_LOOP_VOLUME * 0.28}")
+  # BGMの室内音量を上げたので、効果音も同じ比率で近づけておく
+  # (BGMだけ上げると、室内で効果音が埋もれて聞こえなくなるため)
+  DIST_FAR_VOL=$(awk "BEGIN{printf \"%.3f\", $AMBIENT_LOOP_VOLUME * 0.45}")
   echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${OPEN_START}秒から${OPEN_DURATION}秒で → 近(${AMBIENT_LOOP_VOLUME}/開け)"
 
   # 遠くで聴こえている状態
