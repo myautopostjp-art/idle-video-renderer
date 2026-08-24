@@ -165,20 +165,31 @@ done
 # 8%では LOOP_SPEED=0.6 のときにドリフトを吸収しきれず、
 # ループの継ぎ目で「カクッと戻る」動きが残った。
 # 速度を上げた分だけ単位時間あたりの移動量も増えるため、拡大率も上げる。
-# 【0にしている理由】
-# ドリフトはXFADE_LOOPを長くして「ゆっくり戻す」方式で対処することにしたため、
-# vidstabによる打ち消しが不要になった。
-# vidstabは補正した分の隙間を拡大で埋めるので、使うと画角が失われる。
-# 0にすると安定化を丸ごと飛ばし、生成された画角をそのまま使える。
+# 【18%にしている理由】
+# LTXはカメラを固定しろと指示しても必ずドリフトする。これは業界共通の問題で、
+# プロンプトでは止められない。試した対策と結果は次のとおり:
 #
-#   0  … 安定化しない(現在)。画角をそのまま使える
-#   10 … 打ち消しを試みた値。ドリフトは消えず画角だけ失った
-STABILIZE_ZOOM=0   # 補正で生じる縁の隙間を埋めるための拡大率(%)
+#   end_image_url を開始画像と同じにする … カメラは止まるが湯も湯気も止まる(2回とも再発)
+#   XFADE_LOOP を6秒に延ばす            … カクッは減るが建物の輪郭が二重に見える
+#   STABILIZE_ZOOM=10                    … ドリフトを吸収しきれず残った
+#
+# 結局vidstabで消すのが最も確実で、10%で足りなかったぶん18%まで上げる。
+# 上下左右それぞれ約9%が枠外に出るため画角は狭くなるが、
+# 二重像やカクッとした飛びよりは許容できる。
+#
+# ※第二弾以降は、画像生成の段階で構図を広めに作れば
+#   拡大で削られても余裕が残るようにできる。
+STABILIZE_ZOOM=18   # 補正で生じる縁の隙間を埋めるための拡大率(%)
 
 # ffmpegがvidstabを含まないビルドの場合もあるため、使えるか先に確認する
 # (使えなければ安定化を飛ばす。動画自体は作れる)
 HAS_VIDSTAB=false
-if awk "BEGIN{exit !($STABILIZE_ZOOM < 0.5)}"; then
+if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ]; then
+  # レイヤー合成モードでは建物や空は静止画から取るためドリフトは存在しない。
+  # クリップは湯の領域にしか使われず、そこだけ拡大すると静止画と位置が
+  # 合わなくなるので、安定化は行わない。
+  echo "レイヤー合成モードのため、カメラの安定化は行いません"
+elif awk "BEGIN{exit !($STABILIZE_ZOOM < 0.5)}"; then
   echo "カメラの安定化は行いません(ドリフトはループの継ぎ目を長く溶かして吸収します)"
 elif ffmpeg -hide_banner -filters 2>/dev/null | grep -q vidstabtransform; then
   HAS_VIDSTAB=true
@@ -240,10 +251,14 @@ fi
 # 6秒かけて溶ければ、カクッとした飛びではなく
 # ゆっくりした揺り戻しとして知覚される。
 #
-#   3 … 継ぎ目が短く、位置ずれが飛びとして見えた
-#   6 … 戻りを6秒に引き伸ばす(現在)
+#   3 … 継ぎ目が短い(現在)
+#   6 … 戻りを引き伸ばす案。カクッは減ったが、ずれた2枚が長時間重なるため
+#        建物の柱や庇の輪郭が二重に見えてしまい、かえって目立った
+#
+# 結局「ずれを時間で誤魔化す」のは無理があり、
+# vidstabでずれ自体を消す方針に戻した。
 # ※長くするほどループ周期は短くなる(15.3秒 − この値)
-XFADE_LOOP=6
+XFADE_LOOP=3
 
 # 導入部とループの境目を溶かす秒数
 #
@@ -518,6 +533,112 @@ done
 
 # 本体とクロスフェードを順に連結する(再エンコードなし = 高速)
 ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
+
+# ---- レイヤー合成: 建物と空を静止画に固定する ----
+#
+# 【なぜ必要か】
+# LTXのクリップはカメラが必ずドリフトし、ループの継ぎ目で建物の輪郭がずれる。
+# vidstab(画角が削れる)・end_image_url(湯が止まる)・長いクロスフェード(二重像)、
+# どれも別の問題を生んだ。
+#
+# 【仕組み】Lo-fiアニメと同じ「動く部分だけを動かす」方式
+#   ベース   : stage1の静止画      … 建物・空・雲海。完全静止なのでずれようがない
+#   湯の領域 : LTXのループクリップ … Geminiが特定した座標だけ、ぼかしたマスクで重ねる
+#              水は形が不定形なので、領域内のドリフトも継ぎ目も知覚できない
+#   星       : ffmpegで明滅を描く  … LTXは輝度の変化を表現できないため
+#
+# LAYER_REGIONS(Geminiが返した領域JSON)と BASE_IMAGE_URL が
+# 渡されたときだけ動く。無ければ従来どおり。
+if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
+  echo "レイヤー合成を行います(建物と空を静止画に固定)..."
+  LAYER_OK=true
+
+  # ベースの静止画
+  download_or_die_ "$BASE_IMAGE_URL" base_image.bin || LAYER_OK=false
+  if [ "$LAYER_OK" = true ]; then
+    ffmpeg -y -i base_image.bin \
+      -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1" \
+      -frames:v 1 base_image.png 2>err_base.log || LAYER_OK=false
+  fi
+
+  # 湯の領域からマスクを作る(白=クリップを見せる場所)
+  if [ "$LAYER_OK" = true ]; then
+    MASK_BOXES=""
+    for KEY in water_fall water_surface; do
+      RECT=$(echo "$LAYER_REGIONS" | jq -r --arg k "$KEY" '.[$k] // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
+      if [ -n "$RECT" ]; then
+        read RX RY RW RH <<< "$RECT"
+        # パーセント座標(0-100)をピクセルへ。少し余白を持たせて自然に馴染ませる
+        PX=$(awk "BEGIN{v=1920*($RX-2)/100; if(v<0)v=0; printf \"%d\", v}")
+        PY=$(awk "BEGIN{v=1080*($RY-2)/100; if(v<0)v=0; printf \"%d\", v}")
+        PW=$(awk "BEGIN{v=1920*($RW+4)/100; printf \"%d\", v}")
+        PH=$(awk "BEGIN{v=1080*($RH+4)/100; printf \"%d\", v}")
+        MASK_BOXES="${MASK_BOXES}drawbox=x=${PX}:y=${PY}:w=${PW}:h=${PH}:color=white:t=fill,"
+        echo "  湯の領域(${KEY}): x=${PX} y=${PY} w=${PW} h=${PH}"
+      fi
+    done
+
+    if [ -z "$MASK_BOXES" ]; then
+      echo "  湯の領域が特定されていないため、レイヤー合成を飛ばします"
+      LAYER_OK=false
+    else
+      # 縁を大きくぼかして、静止画とクリップの境目を溶かす
+      ffmpeg -y -f lavfi -i "color=c=black:s=1920x1080" \
+        -vf "${MASK_BOXES}gblur=sigma=50,format=gray" \
+        -frames:v 1 layer_mask.png 2>err_mask.log || LAYER_OK=false
+    fi
+  fi
+
+  # 星の明滅を組み立てる(空の領域に小さな点を散らし、周期をずらして瞬かせる)
+  STAR_BOXES=""
+  if [ "$LAYER_OK" = true ]; then
+    SKY=$(echo "$LAYER_REGIONS" | jq -r '.sky // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
+    if [ -n "$SKY" ]; then
+      read SX SY SW SH <<< "$SKY"
+      STAR_COUNT=28
+      for ((s=1; s<=STAR_COUNT; s++)); do
+        # 固定シードの擬似乱数で、毎回同じ配置になるようにする(再現性のため)
+        eval "$(awk -v i=$s -v sx=$SX -v sy=$SY -v sw=$SW -v sh=$SH 'BEGIN{
+          srand(i*7919);
+          x=int(1920*(sx+rand()*sw)/100);
+          y=int(1080*(sy+rand()*sh*0.85)/100);
+          p=1.5+rand()*3.5;            # 明滅の周期 1.5〜5秒
+          ph=rand()*6.28;              # 位相をばらす
+          th=0.35+rand()*0.35;         # 点灯している時間の割合もばらす
+          printf "STX=%d; STY=%d; STP=%.2f; STPH=%.2f; STTH=%.2f", x, y, p, ph, th
+        }')"
+        STAR_BOXES="${STAR_BOXES}drawbox=x=${STX}:y=${STY}:w=2:h=2:color=white:t=fill:enable='gt(sin(2*PI*t/${STP}+${STPH}),${STTH})',"
+      done
+      echo "  星の明滅: ${STAR_COUNT}個を空の領域に配置"
+    fi
+  fi
+
+  # 合成の実行
+  if [ "$LAYER_OK" = true ]; then
+    LOOP_DUR_ALL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 loop_video.mp4)
+
+    if [ -n "$STAR_BOXES" ]; then
+      STAR_CHAIN=";color=c=black:s=1920x1080:d=${LOOP_DUR_ALL}:r=30[sb];[sb]${STAR_BOXES%,},gblur=sigma=1.1[stars];[merged][stars]blend=all_mode=screen[outv]"
+    else
+      STAR_CHAIN=";[merged]null[outv]"
+    fi
+
+    # 【maskedmergeではなくalphamerge+overlayを使う】
+    # maskedmergeは3入力の画素形式が揃っていないと正しく動かない
+    # (検証環境で、マスクの外までクリップが見える誤動作を確認した)。
+    # クリップにマスクをアルファとして焼き込み、ベースに重ねる方式なら確実。
+    if ffmpeg -y -i loop_video.mp4 -loop 1 -i base_image.png -loop 1 -i layer_mask.png -filter_complex \
+        "[0:v]format=yuva420p[clip];[2:v]format=gray[m];[clip][m]alphamerge[ca];[1:v]format=yuv420p[base];[base][ca]overlay=format=auto[merged]${STAR_CHAIN}" \
+        -map "[outv]" -t "$LOOP_DUR_ALL" -r 30 \
+        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -an loop_layered.mp4 2>err_layer.log; then
+      mv loop_layered.mp4 loop_video.mp4
+      echo "  レイヤー合成が完了しました(建物と空は静止画、湯の領域だけ動画)"
+    else
+      echo "  レイヤー合成に失敗したため、従来のループをそのまま使います"
+      tail -5 err_layer.log || true
+    fi
+  fi
+fi
 
 # ---- ループ部分に夜空のゆらぎを足す ----
 #
