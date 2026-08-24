@@ -64,6 +64,9 @@ jobs:
               echo "ambient_sound_url=${{ github.event.client_payload.ambient_sound_url || 'none' }}" >> $GITHUB_OUTPUT
               echo "particle_key=${{ github.event.client_payload.particle_key || '' }}" >> $GITHUB_OUTPUT
               echo "transitions=${{ github.event.client_payload.transitions || '' }}" >> $GITHUB_OUTPUT
+              echo "base_image_url=${{ github.event.client_payload.base_image_url || '' }}" >> $GITHUB_OUTPUT
+              # layer_regionsはJSON文字列。クォート事故を避けるためファイル経由で渡す
+              echo '${{ github.event.client_payload.layer_regions || '' }}' > layer_regions.json
             else
               echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
             fi
@@ -94,6 +97,7 @@ jobs:
         env:
           AMBIENT_SOUND_URL: ${{ steps.params.outputs.ambient_sound_url }}
           PARTICLE_KEY: ${{ steps.params.outputs.particle_key }}
+          BASE_IMAGE_URL: ${{ steps.params.outputs.base_image_url }}
           TRANSITIONS: ${{ steps.params.outputs.transitions }}
         run: |
           chmod +x render.sh
@@ -105,6 +109,10 @@ jobs:
             ./render_bgm_weather.sh "${{ steps.params.outputs.bgm_url }}" output.mp4 top.txt bottom.txt $IMAGE_URLS
           elif [ "${{ steps.params.outputs.mode }}" = "render-video-youtube-long" ]; then
             IMAGE_URLS=$(jq -r '.[]' image_urls.json | tr '\n' ' ')
+            # レイヤー合成用の領域(空ならレイヤー合成なしで動く)
+            if [ -s layer_regions.json ]; then
+              export LAYER_REGIONS=$(cat layer_regions.json)
+            fi
             ./render_youtube_long.sh "${{ steps.params.outputs.intro_video_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" "${{ steps.params.outputs.intro_duration }}" output.mp4 $IMAGE_URLS
           else
             ./render.sh "${{ steps.params.outputs.image_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" output.mp4 top.txt bottom.txt
@@ -311,9 +319,9 @@ jobs:
           # 半周期しか映らず、ループの継ぎ目そのものが検品対象から外れていた。
           #
           # 周期の内訳: クリップは6秒で生成 → 再生速度0.4倍で15.3秒 →
-          #             シームレスループ加工で末尾6秒が先頭に溶けるため、繰り返し周期は約9秒
+          #             シームレスループ加工で末尾3秒が先頭に溶けるため、繰り返し周期は約12秒
           # (render_youtube_long.sh の LOOP_SPEED / XFADE_LOOP を変えたらここも直すこと)
-          LOOP_PERIOD=9
+          LOOP_PERIOD=12
 
           INTRO_END=$((INTRO_DURATION - 3))
           if [ "$INTRO_END" -lt 0 ]; then INTRO_END=0; fi
@@ -359,18 +367,17 @@ jobs:
           【各場面の位置づけ】
           1つ目 = 導入部。カメラが室内を歩いて外へ出ていく場面。カメラが動くのが正常。
           2つ目 = 導入部からループ部分へ切り替わる境目。
-          3つ目 = ループ部分。同じ約9秒の映像を延々と繰り返す場面。
+          3つ目 = ループ部分。同じ約12秒の映像を延々と繰り返す場面。
                   切り出したのはちょうど1周期分なので、最初と最後がほぼ同じ画になっているはずです。
                   カメラは三脚に固定されているべきで、1ミリも動いてはいけない。
 
           【最重要】3つ目のカメラ移動を厳しく見てください
-          この場面は約9秒ごとに同じ映像が繰り返されます。
-          もしカメラがゆっくり動いていると、約9秒ごとに元の位置へ戻る動きが生まれ、
+          この場面は約12秒ごとに同じ映像が繰り返されます。
+          もしカメラがゆっくり動いていると、約12秒ごとに元の位置へ戻る動きが生まれ、
           視聴者には「カクッと戻る」不自然な繰り返しとして見えてしまいます。
-          ただし今回はドリフトを打ち消すのではなく、継ぎ目を6秒かけて溶かすことで
-          「ゆっくり元に戻る」動きとして見せる設計にしています。
-          そのため、カメラがゆっくり動いていること自体は問題ありません。
-          見てほしいのは、戻る瞬間が「カクッ」と飛んで見えないかどうかです。
+          そのため、ごくわずかな移動でも必ず報告してください。
+          特に建物の柱や庇のような直線は、わずかなずれでも輪郭が二重に見えるため
+          そこを重点的に確認してください。
 
           あわせて、ループの継ぎ目(末尾から先頭へ戻るところ)が滑らかに溶けているか、
           二重像や不自然な飛びがないかも確認してください。
