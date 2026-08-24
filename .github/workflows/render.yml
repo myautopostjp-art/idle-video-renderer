@@ -60,13 +60,15 @@ jobs:
               echo '${{ toJson(github.event.client_payload.image_urls) }}' > image_urls.json
               echo "intro_video_url=${{ github.event.client_payload.intro_video_url }}" >> $GITHUB_OUTPUT
               echo "intro_duration=${{ github.event.client_payload.intro_duration || '20' }}" >> $GITHUB_OUTPUT
-              echo "theme_name=${{ github.event.client_payload.theme_name }}" >> $GITHUB_OUTPUT
               echo "ambient_sound_url=${{ github.event.client_payload.ambient_sound_url || 'none' }}" >> $GITHUB_OUTPUT
               echo "particle_key=${{ github.event.client_payload.particle_key || '' }}" >> $GITHUB_OUTPUT
               echo "transitions=${{ github.event.client_payload.transitions || '' }}" >> $GITHUB_OUTPUT
-              echo "base_image_url=${{ github.event.client_payload.base_image_url || '' }}" >> $GITHUB_OUTPUT
-              # layer_regionsはJSON文字列。クォート事故を避けるためファイル経由で渡す
-              echo '${{ github.event.client_payload.layer_regions || '' }}' > layer_regions.json
+              # レイヤー合成の情報(ベース静止画URL + 湯・空の領域)。
+              # JSON文字列なのでクォート事故を避けるためファイル経由で渡す。
+              # GitHubのclient_payloadは10項目までなので1つにまとめてある。
+              cat > layer_info.json <<'LAYERJSON'
+              ${{ github.event.client_payload.layer_info }}
+              LAYERJSON
             else
               echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
             fi
@@ -97,7 +99,6 @@ jobs:
         env:
           AMBIENT_SOUND_URL: ${{ steps.params.outputs.ambient_sound_url }}
           PARTICLE_KEY: ${{ steps.params.outputs.particle_key }}
-          BASE_IMAGE_URL: ${{ steps.params.outputs.base_image_url }}
           TRANSITIONS: ${{ steps.params.outputs.transitions }}
         run: |
           chmod +x render.sh
@@ -109,9 +110,13 @@ jobs:
             ./render_bgm_weather.sh "${{ steps.params.outputs.bgm_url }}" output.mp4 top.txt bottom.txt $IMAGE_URLS
           elif [ "${{ steps.params.outputs.mode }}" = "render-video-youtube-long" ]; then
             IMAGE_URLS=$(jq -r '.[]' image_urls.json | tr '\n' ' ')
-            # レイヤー合成用の領域(空ならレイヤー合成なしで動く)
-            if [ -s layer_regions.json ]; then
-              export LAYER_REGIONS=$(cat layer_regions.json)
+            # レイヤー合成用の情報を取り出す(空ならレイヤー合成なしで動く)
+            if [ -s layer_info.json ] && jq -e . layer_info.json >/dev/null 2>&1; then
+              export BASE_IMAGE_URL=$(jq -r '.base // empty' layer_info.json)
+              export LAYER_REGIONS=$(jq -c '.regions // empty' layer_info.json)
+              echo "レイヤー合成の情報を受け取りました"
+            else
+              echo "レイヤー合成の情報がないため、従来方式でレンダリングします"
             fi
             ./render_youtube_long.sh "${{ steps.params.outputs.intro_video_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" "${{ steps.params.outputs.intro_duration }}" output.mp4 $IMAGE_URLS
           else
