@@ -64,11 +64,14 @@ jobs:
               echo "particle_key=${{ github.event.client_payload.particle_key || '' }}" >> $GITHUB_OUTPUT
               echo "transitions=${{ github.event.client_payload.transitions || '' }}" >> $GITHUB_OUTPUT
               # レイヤー合成の情報(ベース静止画URL + 湯・空の領域)。
-              # JSON文字列なのでクォート事故を避けるためファイル経由で渡す。
-              # GitHubのclient_payloadは10項目までなので1つにまとめてある。
-              cat > layer_info.json <<'LAYERJSON'
-              ${{ github.event.client_payload.layer_info }}
-              LAYERJSON
+              # GitHubのclient_payloadは10項目までなので1つのJSON文字列にまとめてある。
+              #
+              # 【ヒアドキュメントを使わない理由】
+              # YAMLのブロック内では終端行にもインデントが付いてしまい、
+              # bashが終端と認識できず syntax error になる(実際に失敗した)。
+              # jqでJSONとして書き出せば、引用符の扱いも安全になる。
+              jq -n --argjson v '${{ toJson(github.event.client_payload.layer_info) }}' '$v' > layer_info_raw.json || echo '""' > layer_info_raw.json
+              jq -r '. // empty' layer_info_raw.json > layer_info.json || : 
             else
               echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
             fi
