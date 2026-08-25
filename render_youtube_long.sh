@@ -294,6 +294,9 @@ INTRO_HEAD_CUT=3
 #     ループクリップも作り直す必要がある
 INTRO_TAIL_CUT=0
 
+# レイヤー合成で使う「ループ1周期の長さ」。加工が済んだ時点で設定される。
+SEAMLESS_DUR=""
+
 echo "クリップをシームレスループに加工します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   CLIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
@@ -308,6 +311,8 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       -map "[out]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_loop_$i.mp4" 2>"err_loop_$i.log"; then
     LOOP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_loop_$i.mp4")
     echo "  クリップ$((i+1)): シームレスループ化しました(${CLIP_DUR}秒 → ${LOOP_DUR}秒)"
+    # レイヤー合成で「1周期だけ合成して繰り返す」ために、1周期の長さを覚えておく
+    SEAMLESS_DUR="$LOOP_DUR"
 
     # 【重要】加工後のクリップは「元の${XFADE_LOOP}秒地点」から始まる。
     # 導入部の最終フレームは元の0秒地点なので、そのまま繋ぐと
@@ -549,6 +554,7 @@ ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
 #
 # LAYER_REGIONS(Geminiが返した領域JSON)と BASE_IMAGE_URL が
 # 渡されたときだけ動く。無ければ従来どおり。
+LAYER_APPLIED=false
 if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
   echo "レイヤー合成を行います(建物と空を静止画に固定)..."
   LAYER_OK=true
@@ -598,14 +604,20 @@ if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq 
       STAR_COUNT=28
       for ((s=1; s<=STAR_COUNT; s++)); do
         # 固定シードの擬似乱数で、毎回同じ配置になるようにする(再現性のため)
-        eval "$(awk -v i=$s -v sx=$SX -v sy=$SY -v sw=$SW -v sh=$SH 'BEGIN{
+        #
+        # 【明滅の周期を1周期の約数にする】
+        # 合成は1周期分だけ行い、それをコピーで繰り返す方式にしたため、
+        # 星の周期が1周期を割り切らないと、繰り返しの継ぎ目で明滅が飛ぶ。
+        # 1周期に2〜6回瞬く形にして、必ず割り切れるようにする。
+        eval "$(awk -v i=$s -v sx=$SX -v sy=$SY -v sw=$SW -v sh=$SH -v P=$UNIT_DUR 'BEGIN{
           srand(i*7919);
           x=int(1920*(sx+rand()*sw)/100);
           y=int(1080*(sy+rand()*sh*0.85)/100);
-          p=1.5+rand()*3.5;            # 明滅の周期 1.5〜5秒
+          n=int(2+rand()*5);           # 1周期に2〜6回瞬く
+          p=P/n;                       # 周期は1周期の約数になる
           ph=rand()*6.28;              # 位相をばらす
           th=0.35+rand()*0.35;         # 点灯している時間の割合もばらす
-          printf "STX=%d; STY=%d; STP=%.2f; STPH=%.2f; STTH=%.2f", x, y, p, ph, th
+          printf "STX=%d; STY=%d; STP=%.4f; STPH=%.2f; STTH=%.2f", x, y, p, ph, th
         }')"
         STAR_BOXES="${STAR_BOXES}drawbox=x=${STX}:y=${STY}:w=2:h=2:color=white:t=fill:enable='gt(sin(2*PI*t/${STP}+${STPH}),${STTH})',"
       done
@@ -614,11 +626,27 @@ if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq 
   fi
 
   # 合成の実行
+  #
+  # 【1周期だけ合成してコピーで繰り返す】
+  # ループ部分は同じ映像の繰り返しなので、全長を合成する必要がない。
+  # 1周期(12秒前後)だけ合成し、残りは再エンコードなしのコピーで繰り返す。
+  # 全長を合成すると1時間版で80分以上かかり、GitHub Actionsが
+  # タイムアウトしていた(実際に20分で失敗した)。この方式なら17秒程度で済む。
   if [ "$LAYER_OK" = true ]; then
     LOOP_DUR_ALL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 loop_video.mp4)
 
+    # 1周期の長さ = クリップ長 - ループの継ぎ目
+    # 段階が複数ある場合は周期がひとつに定まらないため、全長を合成する
+    if [ "$CLIP_COUNT" -eq 1 ] && [ -n "$SEAMLESS_DUR" ]; then
+      UNIT_DUR=$(awk "BEGIN{v=$SEAMLESS_DUR; if(v<=0 || v>$LOOP_DUR_ALL) v=$LOOP_DUR_ALL; printf \"%.3f\", v}")
+      echo "  1周期(${UNIT_DUR}秒)だけ合成し、残りは繰り返します"
+    else
+      UNIT_DUR="$LOOP_DUR_ALL"
+      echo "  段階が複数あるため全長(${UNIT_DUR}秒)を合成します"
+    fi
+
     if [ -n "$STAR_BOXES" ]; then
-      STAR_CHAIN=";color=c=black:s=1920x1080:d=${LOOP_DUR_ALL}:r=30[sb];[sb]${STAR_BOXES%,},gblur=sigma=1.1[stars];[merged][stars]blend=all_mode=screen[outv]"
+      STAR_CHAIN=";color=c=black:s=1920x1080:d=${UNIT_DUR}:r=30[sb];[sb]${STAR_BOXES%,},gblur=sigma=1.1[stars];[merged][stars]blend=all_mode=screen[outv]"
     else
       STAR_CHAIN=";[merged]null[outv]"
     fi
@@ -629,10 +657,18 @@ if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq 
     # クリップにマスクをアルファとして焼き込み、ベースに重ねる方式なら確実。
     if ffmpeg -y -i loop_video.mp4 -loop 1 -i base_image.png -loop 1 -i layer_mask.png -filter_complex \
         "[0:v]format=yuva420p[clip];[2:v]format=gray[m];[clip][m]alphamerge[ca];[1:v]format=yuv420p[base];[base][ca]overlay=format=auto[merged]${STAR_CHAIN}" \
-        -map "[outv]" -t "$LOOP_DUR_ALL" -r 30 \
-        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -an loop_layered.mp4 2>err_layer.log; then
-      mv loop_layered.mp4 loop_video.mp4
-      echo "  レイヤー合成が完了しました(建物と空は静止画、湯の領域だけ動画)"
+        -map "[outv]" -t "$UNIT_DUR" -r 30 \
+        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -an unit_layered.mp4 2>err_layer.log; then
+
+      # 合成した1周期を、元の長さになるまでコピーで繰り返す(再エンコードなしなので一瞬)
+      if ffmpeg -y -stream_loop -1 -i unit_layered.mp4 -t "$LOOP_DUR_ALL" -c copy loop_layered.mp4 2>err_layerloop.log; then
+        mv loop_layered.mp4 loop_video.mp4
+        LAYER_APPLIED=true
+        echo "  レイヤー合成が完了しました(建物と空は静止画、湯の領域だけ動画)"
+      else
+        echo "  合成した1周期の繰り返しに失敗したため、従来のループをそのまま使います"
+        tail -5 err_layerloop.log || true
+      fi
     else
       echo "  レイヤー合成に失敗したため、従来のループをそのまま使います"
       tail -5 err_layer.log || true
@@ -645,6 +681,14 @@ fi
 # 星の瞬きも炎の揺らめきもLTXが表現しなかったため、後処理で補う。
 # 0にすると無効。0.015 で±1.5%の明るさの揺らぎ。
 SHIMMER_STRENGTH=0.015
+
+# 【レイヤー合成が動いたときは省く】
+# 合成側で星の明滅を描いているので、画面全体のゆらぎまで足すと過剰になる。
+# また1時間ぶんの全長に掛けると処理が重く、タイムアウトの原因にもなる。
+if [ "${LAYER_APPLIED:-false}" = true ]; then
+  SHIMMER_STRENGTH=0
+  echo "レイヤー合成で星の明滅を描いたため、画面全体のゆらぎは省きます"
+fi
 
 if awk "BEGIN{exit !($SHIMMER_STRENGTH > 0.0001)}"; then
   echo "夜空のゆらぎを加えます(明るさ±$(awk "BEGIN{printf \"%.1f\", $SHIMMER_STRENGTH*100}")%)..."
