@@ -646,9 +646,13 @@ if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq 
     fi
 
     if [ -n "$STAR_BOXES" ]; then
-      STAR_CHAIN=";color=c=black:s=1920x1080:d=${UNIT_DUR}:r=30[sb];[sb]${STAR_BOXES%,},gblur=sigma=1.1[stars];[merged][stars]blend=all_mode=screen[outv]"
+      # 【色形式を揃える】
+      # blendは入力の色形式が違うと色差の扱いを誤り、
+      # 灰色がマゼンタになるなど画面全体の色が壊れる(実際に発生した)。
+      # 両方をgbrpに揃えてからblendし、最後にyuv420pへ戻す。
+      STAR_CHAIN=";color=c=black:s=1920x1080:d=${UNIT_DUR}:r=30[sb];[sb]${STAR_BOXES%,},gblur=sigma=1.1,format=gbrp[stars];[merged]format=gbrp[mg];[mg][stars]blend=all_mode=screen,format=yuv420p[outv]"
     else
-      STAR_CHAIN=";[merged]null[outv]"
+      STAR_CHAIN=";[merged]format=yuv420p[outv]"
     fi
 
     # 【maskedmergeではなくalphamerge+overlayを使う】
@@ -656,7 +660,7 @@ if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq 
     # (検証環境で、マスクの外までクリップが見える誤動作を確認した)。
     # クリップにマスクをアルファとして焼き込み、ベースに重ねる方式なら確実。
     if ffmpeg -y -i loop_video.mp4 -loop 1 -i base_image.png -loop 1 -i layer_mask.png -filter_complex \
-        "[0:v]format=yuva420p[clip];[2:v]format=gray[m];[clip][m]alphamerge[ca];[1:v]format=yuv420p[base];[base][ca]overlay=format=auto[merged]${STAR_CHAIN}" \
+        "[0:v]format=rgba[clip];[2:v]format=gray[m];[clip][m]alphamerge[ca];[1:v]format=rgba[base];[base][ca]overlay=format=rgb[merged]${STAR_CHAIN}" \
         -map "[outv]" -t "$UNIT_DUR" -r 30 \
         -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -an unit_layered.mp4 2>err_layer.log; then
 
