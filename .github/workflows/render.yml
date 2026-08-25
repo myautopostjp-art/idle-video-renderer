@@ -117,6 +117,9 @@ jobs:
             if [ -s layer_info.json ] && jq -e . layer_info.json >/dev/null 2>&1; then
               export BASE_IMAGE_URL=$(jq -r '.base // empty' layer_info.json)
               export LAYER_REGIONS=$(jq -c '.regions // empty' layer_info.json)
+              # 静止画に重ねる素材(湯の落下・湯気)
+              export WATER_FALL_URL=$(jq -r '.materials.water_fall // empty' layer_info.json)
+              export STEAM_URL=$(jq -r '.materials.steam // empty' layer_info.json)
               echo "レイヤー合成の情報を受け取りました"
             else
               echo "レイヤー合成の情報がないため、従来方式でレンダリングします"
