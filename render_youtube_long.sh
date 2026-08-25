@@ -569,8 +569,19 @@ ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
 #
 # 素材自体がループするので、継ぎ目も原理的に存在しない。
 # TikTok用の雨・雪と同じ手法を、画面全体ではなく領域限定で使っている。
+# 【無効にしている理由】
+# 静止画にPexelsの流水・湯気素材を重ねてループを作る方式を試したが、
+# 実写素材とAI画像の質感が合わず、貼り付けたように見えて使えなかった。
+#
+# 雨や雪が馴染むのは「画面全体に散らばる小さな粒」だからで、
+# 滝のように特定の場所に特定の形で存在するものは、
+# 角度・水量・光の当たり方まで一致しないと不自然になる。
+#
+# コードは残してあるので、1 に戻せば再び試せる。
+STILL_LOOP_ENABLED=0
+
 STILL_LOOP_APPLIED=false
-if [ "${STILL_LOOP_ENABLED:-1}" = "1" ] && [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
+if [ "${STILL_LOOP_ENABLED:-0}" = "1" ] && [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
   echo "静止画ベースのループを作ります(背景は完全静止)..."
   STILL_OK=true
 
