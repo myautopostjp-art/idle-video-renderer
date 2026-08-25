@@ -554,8 +554,153 @@ ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
 #
 # LAYER_REGIONS(Geminiが返した領域JSON)と BASE_IMAGE_URL が
 # 渡されたときだけ動く。無ければ従来どおり。
+# ---- 静止画ベースのループを作る(手描きのループ動画と同じ発想) ----
+#
+# 【なぜこの方式か】
+# LTXが生成した動画はカメラが必ずドリフトし、後処理では消しきれなかった。
+# 一方、手作業でループ動画を作る人は「動かない背景」に「動くもの」を
+# 重ねて作っている。だからループも完璧だしカメラも動かない。
+#
+# ここでは同じことをする:
+#   背景   … stage1の静止画。完全静止なのでドリフトも歪みも起こりえない
+#   湯の落下 … Pexelsの流水素材を、Geminiが特定した石樋の位置に重ねる
+#   湯気     … 同じく水面に重ねる
+#   星       … ffmpegで明滅を描く
+#
+# 素材自体がループするので、継ぎ目も原理的に存在しない。
+# TikTok用の雨・雪と同じ手法を、画面全体ではなく領域限定で使っている。
+STILL_LOOP_APPLIED=false
+if [ "${STILL_LOOP_ENABLED:-1}" = "1" ] && [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
+  echo "静止画ベースのループを作ります(背景は完全静止)..."
+  STILL_OK=true
+
+  download_or_die_ "$BASE_IMAGE_URL" still_base.bin || STILL_OK=false
+  if [ "$STILL_OK" = true ]; then
+    ffmpeg -y -i still_base.bin \
+      -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1" \
+      -frames:v 1 still_base.png 2>err_stillbase.log || STILL_OK=false
+  fi
+
+  # 1周期の長さ。素材の長さに合わせると継ぎ目が出ないので、素材優先で決める
+  STILL_UNIT=12
+
+  # ---- 重ねるレイヤーを組み立てる ----
+  STILL_INPUTS=()
+  STILL_FILTER=""
+  STILL_LAST="bg"
+  OVERLAY_IDX=1   # 0番は静止画
+
+  add_overlay_() {
+    # $1=素材URL $2=領域キー $3=ぼかし量 $4=不透明度
+    local URL="$1" KEY="$2" BLUR="$3" OPA="$4"
+    [ -z "$URL" ] || [ "$URL" = "none" ] && return 1
+
+    local RECT
+    RECT=$(echo "$LAYER_REGIONS" | jq -r --arg k "$KEY" '.[$k] // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
+    [ -z "$RECT" ] && return 1
+
+    local RX RY RW RH PX PY PW PH
+    read RX RY RW RH <<< "$RECT"
+    PX=$(awk "BEGIN{v=1920*$RX/100; if(v<0)v=0; printf \"%d\", v}")
+    PY=$(awk "BEGIN{v=1080*$RY/100; if(v<0)v=0; printf \"%d\", v}")
+    PW=$(awk "BEGIN{v=1920*$RW/100; if(v<8)v=8; printf \"%d\", v}")
+    PH=$(awk "BEGIN{v=1080*$RH/100; if(v<8)v=8; printf \"%d\", v}")
+
+    if ! download_or_die_ "$URL" "ov_${KEY}.mp4"; then return 1; fi
+
+    STILL_INPUTS+=(-stream_loop -1 -i "ov_${KEY}.mp4")
+    # 素材を領域の大きさに合わせ、黒いキャンバスの該当位置に置いてから
+    # screenブレンドで重ねる(黒は素通りするので、明るい水や湯気だけが乗る)
+    STILL_FILTER="${STILL_FILTER}[${OVERLAY_IDX}:v]scale=${PW}:${PH},format=gbrp[ovs${OVERLAY_IDX}];"
+    STILL_FILTER="${STILL_FILTER}color=c=black:s=1920x1080:d=${STILL_UNIT}:r=30,format=gbrp[cv${OVERLAY_IDX}];"
+    STILL_FILTER="${STILL_FILTER}[cv${OVERLAY_IDX}][ovs${OVERLAY_IDX}]overlay=x=${PX}:y=${PY}[ovp${OVERLAY_IDX}];"
+    STILL_FILTER="${STILL_FILTER}[ovp${OVERLAY_IDX}]gblur=sigma=${BLUR}[ovb${OVERLAY_IDX}];"
+    STILL_FILTER="${STILL_FILTER}[${STILL_LAST}][ovb${OVERLAY_IDX}]blend=all_mode=screen:all_opacity=${OPA}[bl${OVERLAY_IDX}];"
+    STILL_LAST="bl${OVERLAY_IDX}"
+    echo "  ${KEY} を重ねます (x=${PX} y=${PY} w=${PW} h=${PH})"
+    OVERLAY_IDX=$((OVERLAY_IDX + 1))
+    return 0
+  }
+
+  if [ "$STILL_OK" = true ]; then
+    STILL_FILTER="[0:v]format=gbrp[bg];"
+    add_overlay_ "${WATER_FALL_URL:-}" "water_fall" 3 0.85 || true
+    add_overlay_ "${STEAM_URL:-}" "water_surface" 12 0.35 || true
+
+    if [ "$STILL_LAST" = "bg" ]; then
+      echo "  重ねる素材がないため、静止画ベースのループは作りません"
+      STILL_OK=false
+    fi
+  fi
+
+  # ---- 星の明滅 ----
+  if [ "$STILL_OK" = true ]; then
+    SKY=$(echo "$LAYER_REGIONS" | jq -r '.sky // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
+    if [ -n "$SKY" ]; then
+      read SX SY SW SH <<< "$SKY"
+      STAR_B=""
+      for ((s=1; s<=28; s++)); do
+        eval "$(awk -v i=$s -v sx=$SX -v sy=$SY -v sw=$SW -v sh=$SH -v P=$STILL_UNIT 'BEGIN{
+          srand(i*7919);
+          x=int(1920*(sx+rand()*sw)/100);
+          y=int(1080*(sy+rand()*sh*0.85)/100);
+          n=int(2+rand()*5); p=P/n; ph=rand()*6.28; th=0.35+rand()*0.35;
+          printf "STX=%d; STY=%d; STP=%.4f; STPH=%.2f; STTH=%.2f", x, y, p, ph, th
+        }')"
+        STAR_B="${STAR_B}drawbox=x=${STX}:y=${STY}:w=2:h=2:color=white:t=fill:enable='gt(sin(2*PI*t/${STP}+${STPH}),${STTH})',"
+      done
+      STILL_FILTER="${STILL_FILTER}color=c=black:s=1920x1080:d=${STILL_UNIT}:r=30[stb];"
+      STILL_FILTER="${STILL_FILTER}[stb]${STAR_B%,},gblur=sigma=1.1,format=gbrp[stars];"
+      STILL_FILTER="${STILL_FILTER}[${STILL_LAST}][stars]blend=all_mode=screen[withstars];"
+      STILL_LAST="withstars"
+      echo "  星の明滅を28個配置しました"
+    fi
+    STILL_FILTER="${STILL_FILTER}[${STILL_LAST}]format=yuv420p[stillout]"
+  fi
+
+  # ---- 1周期を作って、必要な長さまで繰り返す ----
+  if [ "$STILL_OK" = true ]; then
+    if ffmpeg -y -loop 1 -i still_base.png "${STILL_INPUTS[@]}" \
+         -filter_complex "$STILL_FILTER" -map "[stillout]" \
+         -t "$STILL_UNIT" -r 30 \
+         -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -an still_unit.mp4 2>err_still.log; then
+
+      LOOP_TARGET=$(ffprobe -v error -show_entries format=duration -of csv=p=0 loop_video.mp4)
+      if ffmpeg -y -stream_loop -1 -i still_unit.mp4 -t "$LOOP_TARGET" -c copy still_loop.mp4 2>err_stillloop.log; then
+        mv still_loop.mp4 loop_video.mp4
+        STILL_LOOP_APPLIED=true
+        echo "  静止画ベースのループを作りました(背景は完全静止・継ぎ目なし)"
+      else
+        echo "  繰り返しに失敗したため、従来のループを使います"
+        tail -5 err_stillloop.log || true
+      fi
+    else
+      echo "  静止画ベースのループ作成に失敗したため、従来のループを使います"
+      tail -5 err_still.log || true
+    fi
+  fi
+fi
+
+# ---- レイヤー合成の有効/無効 ----
+#
+# 【無効にしている理由】
+# 「建物と空は静止画、湯だけ動画」という切り分けを試したが、
+# 静止画とLTX動画は元々別物なので、マスクの境目で
+# 「動かない建物」と「動く建物」が混ざり、かえって歪みが悪化した。
+# マスクのぼかし幅(50px)が広いぶん、その帯全体がぐにゃつく。
+#
+# Lo-fi動画が成立するのは最初からレイヤーごとに描かれているからで、
+# 完成した映像を後から切り分けるのとは根本的に違った。
+#
+# コードは残してあるので、1 に戻せば再び試せる。
+LAYER_COMPOSITE_ENABLED=0
+
 LAYER_APPLIED=false
-if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
+if [ "$LAYER_COMPOSITE_ENABLED" != "1" ]; then
+  if [ -n "${LAYER_REGIONS:-}" ]; then
+    echo "レイヤー合成は無効に設定されているため、従来方式でレンダリングします"
+  fi
+elif [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
   echo "レイヤー合成を行います(建物と空を静止画に固定)..."
   LAYER_OK=true
 
@@ -689,9 +834,9 @@ SHIMMER_STRENGTH=0.015
 # 【レイヤー合成が動いたときは省く】
 # 合成側で星の明滅を描いているので、画面全体のゆらぎまで足すと過剰になる。
 # また1時間ぶんの全長に掛けると処理が重く、タイムアウトの原因にもなる。
-if [ "${LAYER_APPLIED:-false}" = true ]; then
+if [ "${LAYER_APPLIED:-false}" = true ] || [ "${STILL_LOOP_APPLIED:-false}" = true ]; then
   SHIMMER_STRENGTH=0
-  echo "レイヤー合成で星の明滅を描いたため、画面全体のゆらぎは省きます"
+  echo "星の明滅を描いたため、画面全体のゆらぎは省きます"
 fi
 
 if awk "BEGIN{exit !($SHIMMER_STRENGTH > 0.0001)}"; then
