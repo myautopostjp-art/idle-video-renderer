@@ -689,6 +689,72 @@ jobs:
   # そこで導入部の実際の最終フレームを抜き出し、それを起点にループ動画を作る。
   # こうすれば両者は物理的に同じ画像から始まるため、ずれが原理的に発生しない。
   # ============================================================
+
+  # ループ候補の継ぎ目を採点する
+  #
+  # LTXは生成ごとにドリフト量が違うため、複数作って
+  # 「最終フレームと最初のフレームの差」が最も小さいものを選ぶ。
+  # 差が小さいほど、繰り返しても継ぎ目に気づかれにくい。
+  score-loop-seam:
+    if: github.event.action == 'score-loop-seam'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg python3-pil
+
+      - name: Write scorer
+        run: |
+          printf '%s\n' \
+            'import sys' \
+            'from PIL import Image' \
+            'i = sys.argv[1]' \
+            'a = Image.open("f_" + i + ".png").convert("L")' \
+            'b = Image.open("l_" + i + ".png").convert("L")' \
+            'w, h = a.size' \
+            'pts = [(x, y) for x in range(int(w*0.15), int(w*0.85), 4) for y in range(int(h*0.15), int(h*0.85), 4)]' \
+            'd = [abs(a.getpixel(p) - b.getpixel(p)) for p in pts]' \
+            'print("%.2f" % (sum(d)/len(d)))' \
+            > scorer.py
+
+      - name: Score each candidate
+        run: |
+          set -e
+          echo '${{ toJson(github.event.client_payload.clip_urls) }}' > clips.json
+          RESULTS='[]'
+          COUNT=$(jq 'length' clips.json)
+          echo "候補 ${COUNT}本を採点します"
+          for i in $(seq 0 $((COUNT - 1))); do
+            URL=$(jq -r ".[$i]" clips.json)
+            echo "--- 候補$((i+1)) ---"
+            if ! curl -sL --max-time 300 -o "cand_$i.mp4" "$URL"; then
+              echo '  ダウンロードに失敗したため飛ばします'
+              continue
+            fi
+            DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "cand_$i.mp4" || echo 0)
+            if [ -z "$DUR" ] || [ "$DUR" = "0" ]; then echo '  尺が読めず飛ばします'; continue; fi
+            LAST=$(awk "BEGIN{v=$DUR-0.1; if(v<0) v=0; printf \"%.2f\", v}")
+            ffmpeg -v error -ss 0 -i "cand_$i.mp4" -frames:v 1 -vf scale=480:-2 -y "f_$i.png"
+            ffmpeg -v error -ss "$LAST" -i "cand_$i.mp4" -frames:v 1 -vf scale=480:-2 -y "l_$i.png"
+            SCORE=$(python3 scorer.py "$i")
+            echo "  継ぎ目の差: $SCORE"
+            RESULTS=$(echo "$RESULTS" | jq --arg u "$URL" --argjson s "$SCORE" '. + [{url:$u, score:$s}]')
+          done
+          echo "$RESULTS" > results.json
+          jq -c . results.json
+
+      - name: Notify GAS
+        if: always()
+        run: |
+          if [ -n "${{ vars.GAS_WEBHOOK_URL }}" ]; then
+            jq -n --argjson s "$(cat results.json 2>/dev/null || echo '[]')" \
+                  --arg j '${{ github.event.client_payload.job_id }}' \
+                  '{video_type:"loop-seam-score", job_id:$j, scores:$s}' > payload.json
+            curl -sL -X POST -H 'Content-Type: application/json' \
+                 -d @payload.json "${{ vars.GAS_WEBHOOK_URL }}" || true
+          fi
+
   extract-last-frame:
     if: github.event.action == 'extract-last-frame'
     runs-on: ubuntu-latest
