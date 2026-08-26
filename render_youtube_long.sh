@@ -165,7 +165,15 @@ done
 # 8%では LOOP_SPEED=0.6 のときにドリフトを吸収しきれず、
 # ループの継ぎ目で「カクッと戻る」動きが残った。
 # 速度を上げた分だけ単位時間あたりの移動量も増えるため、拡大率も上げる。
-# 【18%にしている理由】
+# 【この値はもう使われていません】
+#
+# ドリフトは「測って線形に打ち消す」方式に変えたため、
+# vidstabによる補正と、それに伴う大きな拡大は不要になった。
+# 必要な拡大率はクリップごとに実測値から自動で決まる(検証では2.6%)。
+#
+# 以下は当時の記録として残す。
+#
+# 【かつて18%にしていた理由】
 # LTXはカメラを固定しろと指示しても必ずドリフトする。これは業界共通の問題で、
 # プロンプトでは止められない。試した対策と結果は次のとおり:
 #
@@ -183,6 +191,8 @@ STABILIZE_ZOOM=18   # 補正で生じる縁の隙間を埋めるための拡大�
 
 # ffmpegがvidstabを含まないビルドの場合もあるため、使えるか先に確認する
 # (使えなければ安定化を飛ばす。動画自体は作れる)
+# vidstabはもう使っていない(ドリフトは実測して線形に打ち消す方式に変更)。
+# 変数だけ残してあるのは、他の箇所から参照されていないことを確認済みのため。
 HAS_VIDSTAB=false
 if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ]; then
   # レイヤー合成モードでは建物や空は静止画から取るためドリフトは存在しない。
@@ -197,27 +207,107 @@ else
   echo "※このffmpegはvidstabを含まないため、カメラの安定化を飛ばします"
 fi
 
-if [ "$HAS_VIDSTAB" = true ]; then
-  echo "ループクリップのカメラドリフトを補正します(拡大${STABILIZE_ZOOM}%)..."
+# ============================================================
+# ループクリップのドリフトを「測って打ち消す」
+#
+# 【なぜvidstabをやめたか】
+# vidstabは手ぶれ補正の道具で、毎フレーム細かく揺れを追いかける。
+# そのため補正量の最大値に合わせて大きく拡大する必要があり、
+# 18%拡大しても打ち消しきれず、画角だけが削られていた。
+#
+# LTXのドリフトは「一定方向へじわじわ流れる」動きなので、
+# 先頭と末尾を比べて移動量を測り、その分だけ線形に逆へ動かせば消える。
+# 検証では 拡大2.6% で完全にゼロ(x=0,y=0)になった。
+#
+# 【測り方】
+# 末尾フレームを少しずつずらして先頭フレームと重ね、
+# 最も一致する位置を探す。そのずれ量がドリフト量になる。
+# ============================================================
+measure_drift_() {
+  # $1 = 動画ファイル / 出力: "DX DY" (末尾が先頭に対してずれている量)
+  local V="$1"
+  local D W H
+  D=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$V")
+  W=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$V")
+  H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$V")
+  local LAST
+  LAST=$(awk -v d="$D" 'BEGIN{v=d-0.1; if(v<0)v=0; printf "%.2f", v}')
+
+  # 比較は1/4に縮小して行う(処理を軽くするため)
+  ffmpeg -v error -ss 0 -i "$V" -frames:v 1 -vf "scale=iw/4:ih/4" -y drift_a.png 2>/dev/null || { echo "0 0"; return; }
+  ffmpeg -v error -ss "$LAST" -i "$V" -frames:v 1 -vf "scale=iw/4:ih/4" -y drift_b.png 2>/dev/null || { echo "0 0"; return; }
+
+  python3 - <<'DRIFTPY'
+from PIL import Image
+try:
+    a = Image.open('drift_a.png').convert('L')
+    b = Image.open('drift_b.png').convert('L')
+except Exception:
+    print("0 0"); raise SystemExit
+w, h = a.size
+ap, bp = a.load(), b.load()
+mx, my = int(w*0.25), int(h*0.25)
+mw, mh = int(w*0.5), int(h*0.5)
+
+def score(dx, dy):
+    tot = n = 0
+    for y in range(my, my+mh, 3):
+        for x in range(mx, mx+mw, 3):
+            sx, sy = x+dx, y+dy
+            if 0 <= sx < w and 0 <= sy < h:
+                tot += abs(ap[x, y] - bp[sx, sy]); n += 1
+    return tot/n if n else 999
+
+best, bdx, bdy = 999, 0, 0
+R = 12   # 縮小後の探索範囲(元解像度で±48px)
+for dy in range(-R, R+1):
+    for dx in range(-R, R+1):
+        s = score(dx, dy)
+        if s < best:
+            best, bdx, bdy = s, dx, dy
+print(f"{bdx*4} {bdy*4}")
+DRIFTPY
+}
+
+DRIFT_ZOOM_PCT=""
+if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
+  echo "ループクリップのドリフトを測って打ち消します..."
   for ((i=0; i<CLIP_COUNT; i++)); do
+    DRIFT=$(measure_drift_ "stage_clip_$i.mp4" 2>/dev/null | tail -1)
+    DX=$(echo "$DRIFT" | awk '{print ($1=="")?0:$1}')
+    DY=$(echo "$DRIFT" | awk '{print ($2=="")?0:$2}')
+
+    if [ "$DX" = "0" ] && [ "$DY" = "0" ]; then
+      echo "  クリップ$((i+1)): ドリフトは検出されませんでした"
+      continue
+    fi
+
+    CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
+    CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "stage_clip_$i.mp4")
+    CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "stage_clip_$i.mp4")
+
+    ABSX=$(awk -v v="$DX" 'BEGIN{printf "%d", (v<0)?-v:v}')
+    ABSY=$(awk -v v="$DY" 'BEGIN{printf "%d", (v<0)?-v:v}')
+    MARGIN=6
+    CW=$(( (CWID - ABSX - MARGIN*2) / 2 * 2 ))
+    CH=$(( (CHGT - ABSY - MARGIN*2) / 2 * 2 ))
+    XMAX=$(( CWID - CW )); YMAX=$(( CHGT - CH ))
+
+    # 動く方向を考え、枠内に収まる位置から始める
+    if [ "$DX" -lt 0 ]; then SX=$XMAX; else SX=0; fi
+    if [ "$DY" -lt 0 ]; then SY=$YMAX; else SY=0; fi
+
+    PCT=$(awk -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.1f", (w/cw-1)*100}')
+    echo "  クリップ$((i+1)): ドリフト x=${DX}px y=${DY}px → 拡大${PCT}%で打ち消します"
+
     if ffmpeg -y -i "stage_clip_$i.mp4" \
-         -vf "vidstabdetect=shakiness=1:accuracy=15:stepsize=2:result=transforms_$i.trf" \
-         -f null - 2>"err_vsdetect_$i.log" \
-       && ffmpeg -y -i "stage_clip_$i.mp4" \
-         -vf "vidstabtransform=input=transforms_$i.trf:smoothing=0:optzoom=0:zoom=${STABILIZE_ZOOM}:maxshift=-1:maxangle=-1:crop=black:interpol=bicubic" \
-         -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_stab_$i.mp4" 2>"err_vstrans_$i.log"; then
-      mv "stage_stab_$i.mp4" "stage_clip_$i.mp4"
-      echo "  クリップ$((i+1)): ドリフトを補正しました"
+         -vf "crop=${CW}:${CH}:x='clip(${SX}+(${DX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${DY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
+         -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_fix_$i.mp4" 2>"err_drift_$i.log"; then
+      mv "stage_fix_$i.mp4" "stage_clip_$i.mp4"
+      DRIFT_ZOOM_PCT="$PCT"
     else
-      echo "  クリップ$((i+1)): 補正に失敗したため、そのまま使います"
-      tail -3 "err_vsdetect_$i.log" "err_vstrans_$i.log" 2>/dev/null || true
-      # 補正できなかった場合、このクリップだけ拡大されない状態になる。
-      # 導入部との大きさを揃えるため、拡大だけは同じ倍率でかけておく。
-      if ffmpeg -y -i "stage_clip_$i.mp4" \
-           -vf "crop=iw/(1+${STABILIZE_ZOOM}/100):ih/(1+${STABILIZE_ZOOM}/100),scale=1920:1080" \
-           -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_zoom_$i.mp4" 2>/dev/null; then
-        mv "stage_zoom_$i.mp4" "stage_clip_$i.mp4"
-      fi
+      echo "    補正に失敗したため、そのまま使います"
+      tail -3 "err_drift_$i.log" 2>/dev/null || true
     fi
   done
 fi
@@ -379,11 +469,14 @@ fi
 # 安定化でループ側が STABILIZE_ZOOM % 拡大されるため、導入部にも同じ倍率をかけて
 # 切り替わる瞬間に画の大きさが変わらないようにする。
 # 安定化を行わなかった場合は拡大なし(空文字)。
-if [ "$HAS_VIDSTAB" = true ]; then
-  INTRO_ZOOM_VF="crop=iw/(1+${STABILIZE_ZOOM}/100):ih/(1+${STABILIZE_ZOOM}/100),scale=1920:1080,"
-  echo "導入部にもループと同じ${STABILIZE_ZOOM}%の拡大をかけます(切り替わりで画の大きさを揃えるため)"
+# 拡大率はクリップごとに実測したドリフト量から決まるので、
+# 補正時に記録した DRIFT_ZOOM_PCT を使う(補正しなかった場合は拡大なし)。
+if [ -n "${DRIFT_ZOOM_PCT:-}" ] && awk -v p="${DRIFT_ZOOM_PCT:-0}" 'BEGIN{exit !(p > 0.05)}'; then
+  INTRO_ZOOM_VF="crop=iw/(1+${DRIFT_ZOOM_PCT}/100):ih/(1+${DRIFT_ZOOM_PCT}/100),scale=1920:1080,"
+  echo "導入部にもループと同じ${DRIFT_ZOOM_PCT}%の拡大をかけます(切り替わりで画の大きさを揃えるため)"
 else
   INTRO_ZOOM_VF=""
+  echo "ドリフト補正による拡大がないため、導入部はそのまま使います"
 fi
 
 # クロスフェードで重なる合計秒数を求める
