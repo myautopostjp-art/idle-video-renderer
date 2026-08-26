@@ -233,9 +233,15 @@ measure_drift_() {
   local LAST
   LAST=$(awk -v d="$D" 'BEGIN{v=d-0.1; if(v<0)v=0; printf "%.2f", v}')
 
-  # 比較は1/4に縮小して行う(処理を軽くするため)
+  # 【二段階で測る理由】
+  # 縮小して測ると処理は軽いが、縮小率の分だけ粗くなる。
+  # 1/4で測ると4px刻みになり、数pxのずれが「0」と判定されてしまう。
+  # 実際には2〜3pxのずれでも継ぎ目のカクッとして見えるため、
+  # まず縮小版で大まかな位置を掴み、次に原寸でその周辺を1px刻みで詰める。
   ffmpeg -v error -ss 0 -i "$V" -frames:v 1 -vf "scale=iw/4:ih/4" -y drift_a.png 2>/dev/null || { echo "0 0"; return; }
   ffmpeg -v error -ss "$LAST" -i "$V" -frames:v 1 -vf "scale=iw/4:ih/4" -y drift_b.png 2>/dev/null || { echo "0 0"; return; }
+  ffmpeg -v error -ss 0 -i "$V" -frames:v 1 -y drift_a_full.png 2>/dev/null || { echo "0 0"; return; }
+  ffmpeg -v error -ss "$LAST" -i "$V" -frames:v 1 -y drift_b_full.png 2>/dev/null || { echo "0 0"; return; }
 
   python3 - <<'DRIFTPY'
 from PIL import Image
@@ -258,6 +264,7 @@ def score(dx, dy):
                 tot += abs(ap[x, y] - bp[sx, sy]); n += 1
     return tot/n if n else 999
 
+# --- 第1段階: 縮小版で大まかな位置を掴む(4px刻み) ---
 best, bdx, bdy = 999, 0, 0
 R = 12   # 縮小後の探索範囲(元解像度で±48px)
 for dy in range(-R, R+1):
@@ -265,7 +272,36 @@ for dy in range(-R, R+1):
         s = score(dx, dy)
         if s < best:
             best, bdx, bdy = s, dx, dy
-print(f"{bdx*4} {bdy*4}")
+
+# --- 第2段階: 原寸でその周辺を1px刻みで詰める ---
+# 数pxのずれでも継ぎ目のカクッとして見えるため、ここまで追い込む
+try:
+    fa = Image.open('drift_a_full.png').convert('L')
+    fb = Image.open('drift_b_full.png').convert('L')
+    fw, fh = fa.size
+    fap, fbp = fa.load(), fb.load()
+    fmx, fmy = int(fw*0.25), int(fh*0.25)
+    fmw, fmh = int(fw*0.5), int(fh*0.5)
+
+    def fscore(dx, dy):
+        tot = n = 0
+        for y in range(fmy, fmy+fmh, 6):
+            for x in range(fmx, fmx+fmw, 6):
+                sx, sy = x+dx, y+dy
+                if 0 <= sx < fw and 0 <= sy < fh:
+                    tot += abs(fap[x, y] - fbp[sx, sy]); n += 1
+        return tot/n if n else 999
+
+    cx, cy = bdx*4, bdy*4
+    fbest, fdx, fdy = 999, cx, cy
+    for dy in range(cy-4, cy+5):
+        for dx in range(cx-4, cx+5):
+            s = fscore(dx, dy)
+            if s < fbest:
+                fbest, fdx, fdy = s, dx, dy
+    print(f"{fdx} {fdy}")
+except Exception:
+    print(f"{bdx*4} {bdy*4}")
 DRIFTPY
 }
 
@@ -277,8 +313,14 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
     DX=$(echo "$DRIFT" | awk '{print ($1=="")?0:$1}')
     DY=$(echo "$DRIFT" | awk '{print ($2=="")?0:$2}')
 
-    if [ "$DX" = "0" ] && [ "$DY" = "0" ]; then
-      echo "  クリップ$((i+1)): ドリフトは検出されませんでした"
+    # 【1pxは無視する】
+    # 映像には湯気や水面の動きがあるため、測定には1px程度の揺らぎが出る。
+    # ドリフトのない素材でも1pxと出ることがあり、それを補正しても意味がない。
+    # 一方2px以上のずれは12秒ごとの「カクッ」として知覚されるので補正する。
+    ADX=$(awk -v v="$DX" 'BEGIN{printf "%d", (v<0)?-v:v}')
+    ADY=$(awk -v v="$DY" 'BEGIN{printf "%d", (v<0)?-v:v}')
+    if [ "$ADX" -le 1 ] && [ "$ADY" -le 1 ]; then
+      echo "  クリップ$((i+1)): ドリフトはほぼありません(x=${DX}px y=${DY}px)"
       continue
     fi
 
