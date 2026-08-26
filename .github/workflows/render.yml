@@ -18,7 +18,7 @@ on:
         required: false
         default: '3600'
   repository_dispatch:
-    types: [render-video, render-video-weather, render-video-youtube-long, render-audio-preview, extract-last-frame]
+    types: [render-video, render-video-weather, render-video-youtube-long, render-audio-preview, extract-last-frame, score-loop-seam]
 
 permissions:
   contents: write
@@ -26,7 +26,7 @@ permissions:
 jobs:
   render:
     # 音声プレビューは別ジョブ(audio-preview)で処理するため、ここでは走らせない
-    if: github.event.action != 'render-audio-preview' && github.event.action != 'extract-last-frame'
+    if: github.event.action != 'render-audio-preview' && github.event.action != 'extract-last-frame' && github.event.action != 'score-loop-seam'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -698,6 +698,7 @@ jobs:
   score-loop-seam:
     if: github.event.action == 'score-loop-seam'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Install FFmpeg
         run: |
