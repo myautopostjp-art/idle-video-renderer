@@ -93,25 +93,21 @@ done
 # 【vidstabによる安定化は廃止した】
 # 隙間埋めのための拡大(zoom=8)がループクリップだけに掛かるため、
 # 導入部から切り替わる瞬間に画が一回り大きくなる問題を起こしていた。
-# ドリフト対策はシームレスループ加工(末尾と先頭のクロスフェード)に一本化する。
+# ドリフト対策は「実測して線形に打ち消す」方式に一本化する。
+#
 # 【調整の目安】
 #   1.0  … 等速(LTXが生成したまま。雲が早回しに見える)
 #   0.6  … 6秒→10秒。雲は落ち着くが、導入部のほぼ静止した雲とはまだ差がある
 #   0.4  … 6秒→15秒。雲の動きが1/3以下になり、導入部との差がほぼ分からなくなる
 #          湯気や水面もゆっくりになるが、放置動画ではむしろ落ち着いて見える
-# ループクリップの再生速度
 #
 # 【トレードオフ】
 # 遅くするほどループ周期が長くなり、繰り返し感が減る。
 # しかし遅すぎると、石樋から落ちる水のような速い動きが
 # 止まって見えてしまう(0.4で実際にそうなった)。
 #
-#   0.4 … 周期12.3秒。水はやや遅いが、繰り返しが目立たない(現在)
-#   0.6 … 周期7.2秒。水は自然に流れるが、7秒ごとの繰り返しが強く出た
-#
-# 0.6を試したところ、水の見え方は改善したものの、
-# ループの周期が短くなったぶん「カクッと戻る」感じが強くなった。
-# 1時間流す動画では繰り返しの目立ちにくさを優先するため0.4に戻す。
+#   0.4 … 周期15.3秒。水はやや遅いが、繰り返しが目立たない(現在)
+#   0.6 … 周期10.2秒。水は自然に流れるが、10秒ごとの繰り返しが強く出た
 #
 # ※この値を変えたら render.yml の LOOP_PERIOD も直すこと
 #   (Geminiの動画チェックが1周期分を切り出すのに使っている)
@@ -143,69 +139,10 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   fi
 done
 
-# ---- ①-2b ループクリップのカメラドリフトを止める ----
-#
-# 【なぜ必要か】
-# プロンプトで "The camera is locked off on a fixed mount... no pan, no tilt, no drift"
-# と強く書いてもLTXは守らず、ループクリップの中でカメラがゆっくり一方向に流れる。
-# ループは12秒で先頭に戻るため、視聴者には
-# 「12秒かけてスクロールしては元に戻る」という不自然な繰り返しに見えてしまう。
-#
-# プロンプトで3回試して直らなかったので、後処理で確実に潰す方針に切り替える。
-#
-# 【以前vidstabを廃止した理由と、その解決】
-# 以前は隙間を埋める拡大(zoom)がループクリップにだけ掛かっていたため、
-# 導入部から切り替わる瞬間に画が一回り大きくなる問題が起きて廃止した。
-# 今回は「導入部にもまったく同じ倍率の拡大をかける」ことで解決する。
-# 下の STABILIZE_ZOOM は⑤の導入部処理でも同じ値が使われる。
-#
-# smoothing=0 は「カメラは静止しているはず」という前提で補正するモード。
-# 移動平均で滑らかにするのではなく、ドリフトそのものを打ち消す。
-# 【拡大率の調整】
-# 8%では LOOP_SPEED=0.6 のときにドリフトを吸収しきれず、
-# ループの継ぎ目で「カクッと戻る」動きが残った。
-# 速度を上げた分だけ単位時間あたりの移動量も増えるため、拡大率も上げる。
-# 【この値はもう使われていません】
-#
-# ドリフトは「測って線形に打ち消す」方式に変えたため、
-# vidstabによる補正と、それに伴う大きな拡大は不要になった。
-# 必要な拡大率はクリップごとに実測値から自動で決まる(検証では2.6%)。
-#
-# 以下は当時の記録として残す。
-#
-# 【かつて18%にしていた理由】
-# LTXはカメラを固定しろと指示しても必ずドリフトする。これは業界共通の問題で、
-# プロンプトでは止められない。試した対策と結果は次のとおり:
-#
-#   end_image_url を開始画像と同じにする … カメラは止まるが湯も湯気も止まる(2回とも再発)
-#   XFADE_LOOP を6秒に延ばす            … カクッは減るが建物の輪郭が二重に見える
-#   STABILIZE_ZOOM=10                    … ドリフトを吸収しきれず残った
-#
-# 結局vidstabで消すのが最も確実で、10%で足りなかったぶん18%まで上げる。
-# 上下左右それぞれ約9%が枠外に出るため画角は狭くなるが、
-# 二重像やカクッとした飛びよりは許容できる。
-#
-# ※第二弾以降は、画像生成の段階で構図を広めに作れば
-#   拡大で削られても余裕が残るようにできる。
-STABILIZE_ZOOM=18   # 補正で生じる縁の隙間を埋めるための拡大率(%)
-
-# ffmpegがvidstabを含まないビルドの場合もあるため、使えるか先に確認する
-# (使えなければ安定化を飛ばす。動画自体は作れる)
 # vidstabはもう使っていない(ドリフトは実測して線形に打ち消す方式に変更)。
 # 変数だけ残してあるのは、他の箇所から参照されていないことを確認済みのため。
+STABILIZE_ZOOM=0
 HAS_VIDSTAB=false
-if [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ]; then
-  # レイヤー合成モードでは建物や空は静止画から取るためドリフトは存在しない。
-  # クリップは湯の領域にしか使われず、そこだけ拡大すると静止画と位置が
-  # 合わなくなるので、安定化は行わない。
-  echo "レイヤー合成モードのため、カメラの安定化は行いません"
-elif awk "BEGIN{exit !($STABILIZE_ZOOM < 0.5)}"; then
-  echo "カメラの安定化は行いません(ドリフトはループの継ぎ目を長く溶かして吸収します)"
-elif ffmpeg -hide_banner -filters 2>/dev/null | grep -q vidstabtransform; then
-  HAS_VIDSTAB=true
-else
-  echo "※このffmpegはvidstabを含まないため、カメラの安定化を飛ばします"
-fi
 
 # ============================================================
 # ループクリップのドリフトを「測って打ち消す」
@@ -217,151 +154,372 @@ fi
 #
 # LTXのドリフトは「一定方向へじわじわ流れる」動きなので、
 # 先頭と末尾を比べて移動量を測り、その分だけ線形に逆へ動かせば消える。
-# 検証では 拡大2.6% で完全にゼロ(x=0,y=0)になった。
 #
 # 【測り方】
 # 末尾フレームを少しずつずらして先頭フレームと重ね、
 # 最も一致する位置を探す。そのずれ量がドリフト量になる。
+# 画面を4分割してそれぞれ測ることで、
+#   4つの平均      = 平行移動
+#   外向きの広がり = ズーム
+# を同時に取り出せる。
+#
+# ------------------------------------------------------------
+# 【2026/08/27 の修正】測定が一度も動いていなかった問題を直した
+#
+# ①Pillowを使うのをやめた
+#   renderジョブにはPillowが入っていない(score-loop-seamジョブにだけ
+#   python3-pil を入れている)。以前の実装は `from PIL import Image` が
+#   try の外にあったため import の時点で例外になり、標準出力が空のまま
+#   終了していた。呼び出し側が 2>/dev/null で握りつぶしていたので、
+#   awkの既定値 "0 0 1.0" が入り、毎回「ドリフトはありません」と
+#   表示されていた。つまり測定が一度も走っていなかった。
+#   → ffmpegに生の輝度データ(gray/rawvideo)を吐かせ、
+#     標準ライブラリだけで読む。追加インストールは不要。
+#
+# ②判定を緩めた
+#   以前は「一致度が4割以上改善しなければ動いていない」としていた。
+#   夜の情景は暗く模様が乏しいため、実際にずれていても改善は1〜2割で、
+#   本物のドリフトまで「動いていない」と切り捨てていた。
+#   → 2%以上の改善で採用する。判断の材料は必ずログに出す。
+#
+# ③縮小方向のズームに対応した
+#   zoompanは倍率1未満を受け付けず、1に丸める。
+#   カメラが引いていく場合の倍率は0.97のような値になり、
+#   以前の式は 0.97→1.00 という1以下の範囲を指定していたため、
+#   フィルタとしては何もしていなかった。
+#   → 補正の基準をずらし、常に1以上の範囲で指定する。
 # ============================================================
+
+# 測定に使う解像度(小さくすると速いが、細かいずれを取り逃す)
+MEAS_W=960
+MEAS_H=540
+
 measure_drift_() {
-  # $1 = 動画ファイル / 出力: "DX DY ZOOM"
-  #   DX,DY = 末尾が先頭に対してずれている量(px)
-  #   ZOOM  = 末尾が先頭に対して何倍になっているか(1.0なら等倍)
-  #
-  # 【4分割で測る理由】
-  # 画面全体をひとつとして測ると平行移動しか分からない。
-  # 4隅それぞれの移動量を測れば、
-  #   4つの平均       = 平行移動
-  #   外向きの広がり  = ズーム
-  # として両方を同時に取り出せる。
-  # LTXのドリフトは「じわじわ引いていく」ズームを含むことがあり、
-  # 平行移動だけ直しても周期ごとの拡大が残っていた。
+  # $1 = 動画ファイル / 標準出力の最終行: "DX DY ZOOM"
+  #   DX,DY = 末尾が先頭に対してずれている量(元の解像度でのpx)
+  #   ZOOM  = 末尾が先頭に対して何倍になっているか(1.0なら等倍、1未満なら引いている)
+  # 途中経過は標準エラーに出す(ログに残す)
   local V="$1"
-  local D
+  local D LAST SRCW SCALE
+
   D=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$V")
-  local LAST
+  SRCW=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$V")
   LAST=$(awk -v d="$D" 'BEGIN{v=d-0.1; if(v<0)v=0; printf "%.2f", v}')
+  SCALE=$(awk -v a="$SRCW" -v m="$MEAS_W" 'BEGIN{printf "%.4f", (m>0)?a/m:1}')
 
-  ffmpeg -v error -ss 0 -i "$V" -frames:v 1 -y drift_a.png 2>/dev/null || { echo "0 0 1.0"; return; }
-  ffmpeg -v error -ss "$LAST" -i "$V" -frames:v 1 -y drift_b.png 2>/dev/null || { echo "0 0 1.0"; return; }
+  if ! ffmpeg -v error -ss 0 -i "$V" -frames:v 1 \
+       -vf "scale=${MEAS_W}:${MEAS_H}" -pix_fmt gray -f rawvideo -y drift_a.raw 2>/dev/null; then
+    echo "    測定: 先頭フレームを取り出せませんでした" >&2
+    echo "0 0 1.0"; return
+  fi
+  if ! ffmpeg -v error -ss "$LAST" -i "$V" -frames:v 1 \
+       -vf "scale=${MEAS_W}:${MEAS_H}" -pix_fmt gray -f rawvideo -y drift_b.raw 2>/dev/null; then
+    echo "    測定: 末尾フレームを取り出せませんでした" >&2
+    echo "0 0 1.0"; return
+  fi
 
-  python3 - <<'DRIFTPY'
-from PIL import Image
+  MEAS_W="$MEAS_W" MEAS_H="$MEAS_H" MEAS_SCALE="$SCALE" python3 - <<'DRIFTPY'
+import os, sys
+
+W = int(os.environ['MEAS_W'])
+H = int(os.environ['MEAS_H'])
+SCALE = float(os.environ['MEAS_SCALE'])
+
+def bail(msg):
+    print('    測定: ' + msg, file=sys.stderr)
+    print('0 0 1.0')
+    raise SystemExit
+
 try:
-    a = Image.open('drift_a.png').convert('L')
-    b = Image.open('drift_b.png').convert('L')
-except Exception:
-    print("0 0 1.0"); raise SystemExit
+    a = open('drift_a.raw', 'rb').read()
+    b = open('drift_b.raw', 'rb').read()
+except Exception as e:
+    bail('フレームを読めませんでした (%s)' % e)
 
-W, H = a.size
-ap, bp = a.load(), b.load()
+if len(a) < W * H or len(b) < W * H:
+    bail('データが足りません (a=%d b=%d 必要=%d)' % (len(a), len(b), W * H))
+
+STEP = 4          # 何画素おきに比べるか(小さいほど正確だが遅い)
+RANGE = 16        # 探す範囲(±px、測定解像度での値)
+COARSE = 2        # 粗探しの刻み
+
+def diff(x0, y0, rw, rh, dx, dy):
+    """末尾を(dx,dy)ずらしたときの、先頭との明るさの差の平均"""
+    tot = 0
+    n = 0
+    for y in range(y0, y0 + rh, STEP):
+        ry = y + dy
+        if ry < 0 or ry >= H:
+            continue
+        ra = y * W
+        rb = ry * W
+        for x in range(x0, x0 + rw, STEP):
+            rx = x + dx
+            if rx < 0 or rx >= W:
+                continue
+            d = a[ra + x] - b[rb + rx]
+            tot += d if d >= 0 else -d
+            n += 1
+    return (tot / n) if n else 9e9
+
+def subpixel(d_minus, d0, d_plus):
+    """前後1pxの一致度から、1px未満のずれを放物線あてはめで求める
+
+    ズームは「4隅のずれの差」から求めるため、1pxの丸め誤差が
+    そのまま倍率の誤差になる。検証では3.00%のズームを3.51%と
+    測ってしまい、そのぶん補正が効きすぎた。
+    小数点以下まで求めれば、この測りすぎがほぼ消える。
+    """
+    den = d_minus - 2 * d0 + d_plus
+    if den <= 1e-9:
+        return 0.0
+    delta = 0.5 * (d_minus - d_plus) / den
+    if delta > 1.0:
+        delta = 1.0
+    elif delta < -1.0:
+        delta = -1.0
+    return delta
 
 def measure(cx, cy, rw, rh):
-    """指定した領域が、末尾でどれだけ動いたかを測る"""
-    x0, y0 = int(cx - rw/2), int(cy - rh/2)
-    best, bdx, bdy, base = 9e9, 0, 0, None
-    for dy in range(-24, 25, 2):
-        for dx in range(-24, 25, 2):
-            tot = n = 0
-            for y in range(y0, y0+int(rh), 8):
-                for x in range(x0, x0+int(rw), 8):
-                    sx, sy = x+dx, y+dy
-                    if 0 <= sx < W and 0 <= sy < H:
-                        tot += abs(ap[x, y] - bp[sx, sy]); n += 1
-            if n:
-                s = tot/n
-                if dx == 0 and dy == 0: base = s
-                if s < best: best, bdx, bdy = s, dx, dy
-    # 模様の少ない領域では偶然どこかが一致してしまう。
-    # 一致度が十分に改善していなければ「動いていない」とみなす。
-    if base is not None and best > base * 0.6:
-        return 0, 0
-    return bdx, bdy
+    """この領域が末尾でどれだけ動いたかを測る"""
+    x0 = int(cx - rw / 2)
+    y0 = int(cy - rh / 2)
+    base = diff(x0, y0, rw, rh, 0, 0)
 
-qw, qh = W*0.3, H*0.3
-pts = [(W*0.28, H*0.28), (W*0.72, H*0.28), (W*0.28, H*0.72), (W*0.72, H*0.72)]
-res = [measure(cx, cy, qw, qh) for cx, cy in pts]
+    best = None
+    for dy in range(-RANGE, RANGE + 1, COARSE):
+        for dx in range(-RANGE, RANGE + 1, COARSE):
+            s = diff(x0, y0, rw, rh, dx, dy)
+            if best is None or s < best[0]:
+                best = (s, dx, dy)
+    bs, bdx, bdy = best
 
-mdx = sum(r[0] for r in res)/4.0
-mdy = sum(r[1] for r in res)/4.0
+    # 粗探しで見つけた位置の周り1pxを細かく見る
+    for dy in range(bdy - 1, bdy + 2):
+        for dx in range(bdx - 1, bdx + 2):
+            s = diff(x0, y0, rw, rh, dx, dy)
+            if s < bs:
+                bs, bdx, bdy = s, dx, dy
 
-# 左右・上下の広がりから倍率を求める
-spread_x = ((res[1][0]-res[0][0]) + (res[3][0]-res[2][0]))/2.0
-spread_y = ((res[2][1]-res[0][1]) + (res[3][1]-res[1][1]))/2.0
-zx = 1 + spread_x/(W*0.44)
-zy = 1 + spread_y/(H*0.44)
-zoom = (zx + zy)/2.0
-if zoom < 0.9 or zoom > 1.1:   # 明らかに異常な値は無視する
-    zoom = 1.0
+    # 1px未満のずれを求める
+    fx = subpixel(diff(x0, y0, rw, rh, bdx - 1, bdy), bs,
+                  diff(x0, y0, rw, rh, bdx + 1, bdy))
+    fy = subpixel(diff(x0, y0, rw, rh, bdx, bdy - 1), bs,
+                  diff(x0, y0, rw, rh, bdx, bdy + 1))
 
-print(f"{int(round(mdx))} {int(round(mdy))} {zoom:.4f}")
+    return bdx + fx, bdy + fy, base, bs
+
+rw = int(W * 0.30)
+rh = int(H * 0.30)
+pts = [(W * 0.28, H * 0.28), (W * 0.72, H * 0.28),
+       (W * 0.28, H * 0.72), (W * 0.72, H * 0.72)]
+labels = ['左上', '右上', '左下', '右下']
+
+# 判定のしきい値
+#   MIN_TEXTURE … これ未満は模様が乏しく、どこでも一致してしまうので信用しない
+#   MIN_GAIN    … 一致度がこの割合まで改善していれば「動いた」とみなす
+MIN_TEXTURE = 1.2
+MIN_GAIN = 0.98
+
+res = []
+for (cx, cy), label in zip(pts, labels):
+    dx, dy, base, bs = measure(cx, cy, rw, rh)
+    ratio = (bs / base) if base > 0 else 1.0
+    if base < MIN_TEXTURE:
+        verdict = '模様が乏しく不採用'
+        ok = False
+    elif ratio > MIN_GAIN:
+        verdict = '動いていません'
+        ok = False
+    else:
+        verdict = '採用'
+        ok = True
+    print('    %s: dx=%+.1f dy=%+.1f  一致度 %.2f→%.2f (%.0f%%) %s'
+          % (label, dx, dy, base, bs, ratio * 100, verdict),
+          file=sys.stderr)
+    res.append((dx, dy) if ok else None)
+
+valid = [r for r in res if r is not None]
+if not valid:
+    print('    どの領域からも動きを読み取れませんでした', file=sys.stderr)
+    print('0 0 1.0')
+    raise SystemExit
+
+mdx = sum(r[0] for r in valid) / float(len(valid))
+mdy = sum(r[1] for r in valid) / float(len(valid))
+
+# ズームは4隅すべてが読めたときだけ求める
+# (一部だけだと「広がり」を正しく取り出せないため)
+zoom = 1.0
+if len(valid) == 4:
+    spread_x = ((res[1][0] - res[0][0]) + (res[3][0] - res[2][0])) / 2.0
+    spread_y = ((res[2][1] - res[0][1]) + (res[3][1] - res[1][1])) / 2.0
+    zx = 1 + spread_x / (W * 0.44)
+    zy = 1 + spread_y / (H * 0.44)
+    zoom = (zx + zy) / 2.0
+    print('    広がり: 横%+.1fpx 縦%+.1fpx → 倍率%.4f' % (spread_x, spread_y, zoom), file=sys.stderr)
+    if zoom < 0.9 or zoom > 1.1:
+        print('    倍率が異常なため無視します', file=sys.stderr)
+        zoom = 1.0
+else:
+    print('    4隅のうち%d箇所しか読めなかったため、ズームは測りません' % len(valid), file=sys.stderr)
+
+print('%d %d %.4f' % (int(round(mdx * SCALE)), int(round(mdy * SCALE)), zoom))
 DRIFTPY
 }
+
+# 補正を何回まで繰り返すか
+#
+# 【なぜ繰り返すのか】
+# ズーム量は「4隅のずれの差」から求めるため、測定にわずかな誤差が乗る。
+# 検証では3.0%のズームを3.4%と測り、そのぶん打ち消しすぎて
+# 逆向きに0.5%ほど残った。
+# 補正後にもう一度測って、残っていればもう一度打ち消せば、
+# 誤差の誤差まで小さくなり、しきい値以下に収まる。
+# 残りが基準以下なら1回で抜けるので、余計な再エンコードは起きない。
+DRIFT_MAX_PASSES=2
+
+# 切り取ってよい上限(1.06 = 6%)
+#
+# 【なぜ歯止めが要るか】
+# 水や湯気のように形の変わるものが画面を占めていると、測定値が揺れる。
+# 検証で「模様そのものが動く映像」を通したところ、
+# 1回目で2.3%、2回目で3.1%と測り続け、累計8.5%も切り取ってしまった。
+# 補正のたびに画角が削られるので、際限なく繰り返させてはいけない。
+# 2回目以降はこの上限を超える補正を行わない。
+DRIFT_MAX_TOTAL_ZOOM=1.06
 
 DRIFT_ZOOM_PCT=""
 if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
   echo "ループクリップのドリフトを測って打ち消します..."
   for ((i=0; i<CLIP_COUNT; i++)); do
-    DRIFT=$(measure_drift_ "stage_clip_$i.mp4" 2>/dev/null | tail -1)
-    DX=$(echo "$DRIFT" | awk '{print ($1=="")?0:$1}')
-    DY=$(echo "$DRIFT" | awk '{print ($2=="")?0:$2}')
-    DZ=$(echo "$DRIFT" | awk '{print ($3=="")?1.0:$3}')
+    CUM_ZOOM=1
+    CUM_ZOOM_PREV=1
+    PREV_MAG=""
 
-    # ズームが1%以上あるかどうか
-    HAS_ZOOM=$(awk -v z="$DZ" 'BEGIN{d=(z>1)?z-1:1-z; print (d>0.003)?1:0}')
+    for ((pass=1; pass<=DRIFT_MAX_PASSES; pass++)); do
+      echo "  クリップ$((i+1)) ${pass}回目の測定..."
+      # 標準エラー(測定の途中経過)はログに流し、標準出力の最終行だけを受け取る
+      DRIFT=$(measure_drift_ "stage_clip_$i.mp4" | tail -1)
+      DX=$(echo "$DRIFT" | awk '{print ($1=="")?0:$1}')
+      DY=$(echo "$DRIFT" | awk '{print ($2=="")?0:$2}')
+      DZ=$(echo "$DRIFT" | awk '{print ($3=="")?1.0:$3}')
 
-    if [ "$DX" = "0" ] && [ "$DY" = "0" ] && [ "$HAS_ZOOM" = "0" ]; then
-      echo "  クリップ$((i+1)): ドリフトはありません"
-      continue
-    fi
+      # 測りすぎの歯止め。4%を超えるズームは測定の誤りとみなして切り詰める
+      DZ=$(awk -v z="$DZ" 'BEGIN{if(z>1.04)z=1.04; if(z<0.96)z=0.96; printf "%.4f", z}')
 
-    CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
-    CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "stage_clip_$i.mp4")
-    CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "stage_clip_$i.mp4")
+      # ズームが0.3%以上あるかどうか
+      HAS_ZOOM=$(awk -v z="$DZ" 'BEGIN{d=(z>1)?z-1:1-z; print (d>0.003)?1:0}')
+      ZPCT=$(awk -v z="$DZ" 'BEGIN{printf "%+.2f", (z-1)*100}')
 
-    ABSX=$(awk -v v="$DX" 'BEGIN{printf "%d", (v<0)?-v:v}')
-    ABSY=$(awk -v v="$DY" 'BEGIN{printf "%d", (v<0)?-v:v}')
+      # 平行移動は2px未満なら放っておく(1時間流しても知覚できない)
+      HAS_PAN=$(awk -v x="$DX" -v y="$DY" 'BEGIN{ax=(x<0)?-x:x; ay=(y<0)?-y:y; print (ax>=2||ay>=2)?1:0}')
 
-    # 【切り出す枠の大きさ】
-    # 平行移動ぶんに加えて、ズームぶんの余白も確保する。
-    # 末尾がZ倍に広がっているなら、その分だけ内側を使えば打ち消せる。
-    ZPAD=$(awk -v z="$DZ" -v w="$CWID" 'BEGIN{d=(z>1)?z-1:1-z; printf "%d", w*d/2}')
-    MARGIN=6
-    CW=$(( (CWID - ABSX - ZPAD*2 - MARGIN*2) / 2 * 2 ))
-    CH=$(( (CHGT - ABSY - (ZPAD*CHGT/CWID)*2 - MARGIN*2) / 2 * 2 ))
-    XMAX=$(( CWID - CW )); YMAX=$(( CHGT - CH ))
+      # ずれの大きさをひとつの数字にまとめる(前回と比べて良くなったか判断するため)
+      MAG=$(awk -v x="$DX" -v y="$DY" -v z="$DZ" 'BEGIN{ax=(x<0)?-x:x; ay=(y<0)?-y:y; d=(z>1)?z-1:1-z; printf "%.2f", ax+ay+d*1000}')
 
-    # 動く方向を考え、枠内に収まる位置から始める
-    if [ "$DX" -lt 0 ]; then SX=$XMAX; else SX=0; fi
-    if [ "$DY" -lt 0 ]; then SY=$YMAX; else SY=0; fi
+      if [ "$HAS_PAN" = "0" ] && [ "$HAS_ZOOM" = "0" ]; then
+        if [ "$pass" -eq 1 ]; then
+          echo "  クリップ$((i+1)): 補正不要 (x=${DX}px y=${DY}px ズーム${ZPCT}%)"
+        else
+          echo "  クリップ$((i+1)): 残り x=${DX}px y=${DY}px ズーム${ZPCT}% — 基準以下なのでここで止めます"
+        fi
+        break
+      fi
 
-    PCT=$(awk -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.1f", (w/cw-1)*100}')
-    ZPCT=$(awk -v z="$DZ" 'BEGIN{printf "%+.2f", (z-1)*100}')
-    echo "  クリップ$((i+1)): ドリフト x=${DX}px y=${DY}px ズーム${ZPCT}% → 拡大${PCT}%で打ち消します"
+      # 【前回より悪くなっていたら元に戻す】
+      # 測定が揺れている証拠なので、これ以上いじらないほうがよい。
+      if [ -n "$PREV_MAG" ] && awk -v a="$MAG" -v b="$PREV_MAG" 'BEGIN{exit !(a >= b)}'; then
+        echo "  クリップ$((i+1)): ${pass}回目の測定で悪化しました(${PREV_MAG}→${MAG})。前の状態に戻します"
+        [ -f "stage_prev_$i.mp4" ] && mv "stage_prev_$i.mp4" "stage_clip_$i.mp4"
+        CUM_ZOOM="$CUM_ZOOM_PREV"
+        break
+      fi
 
-    # 【二段階で打ち消す】
-    #   1. zoompan でズームを打ち消す
-    #      先頭をZ倍に拡大した状態から始め、末尾で等倍に戻す。
-    #      末尾がZ倍に広がっているので、これで相殺される。
-    #      (cropの式で枠の大きさを変える方法も試したが、
-    #       式が複雑すぎてffmpegが受け付けなかった)
-    #   2. crop で平行移動を打ち消す
-    #
-    # 一度に書くとエラーになるため、フィルタを順に並べる。
-    ZOOM_VF=""
-    if [ "$HAS_ZOOM" = "1" ]; then
-      FRAMES=$(awk -v d="$CD" 'BEGIN{printf "%d", d*30}')
-      ZOOM_VF="zoompan=z='${DZ}-(${DZ}-1)*in/${FRAMES}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${CWID}x${CHGT}:fps=30,"
-    fi
+      CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
+      CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "stage_clip_$i.mp4")
+      CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "stage_clip_$i.mp4")
 
-    if ffmpeg -y -i "stage_clip_$i.mp4" \
-         -vf "${ZOOM_VF}crop=${CW}:${CH}:x='clip(${SX}+(${DX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${DY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
-         -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_fix_$i.mp4" 2>"err_drift_$i.log"; then
-      mv "stage_fix_$i.mp4" "stage_clip_$i.mp4"
-      DRIFT_ZOOM_PCT="$PCT"
-    else
-      echo "    補正に失敗したため、そのまま使います"
-      tail -3 "err_drift_$i.log" 2>/dev/null || true
+      ABSX=$(awk -v v="$DX" 'BEGIN{printf "%d", (v<0)?-v:v}')
+      ABSY=$(awk -v v="$DY" 'BEGIN{printf "%d", (v<0)?-v:v}')
+
+      # 【ズーム補正の倍率】
+      #
+      # 末尾は先頭に対して DZ 倍になっている。これを打ち消すには
+      # 時間とともに 1/DZ 倍していけばよい。
+      # ただしzoompanは1未満の倍率を受け付けず1に丸めるため、
+      # 全体を持ち上げて常に1以上になるようにする。
+      #
+      #   ZSTART = max(1, DZ)
+      #   ZEND   = ZSTART / DZ
+      #
+      #   DZ<1(カメラが引いていく) … 1.0000 → 1/DZ (1以上)
+      #   DZ>1(カメラが寄っていく) … DZ     → 1.0000 (1以上)
+      #
+      # 以前は常に DZ → 1 としていたため、引いていく場合に
+      # 1以下の範囲を指定してしまい、フィルタが何もしていなかった。
+      # 「少しずつ引いていって周期の頭で戻る」症状が消えなかったのはこのため。
+      ZOOM_VF=""
+      ZMAX=1
+      if [ "$HAS_ZOOM" = "1" ]; then
+        FRAMES=$(awk -v d="$CD" 'BEGIN{printf "%d", d*30}')
+        ZSTART=$(awk -v z="$DZ" 'BEGIN{printf "%.6f", (z>1)?z:1}')
+        ZEND=$(awk -v z="$DZ" 'BEGIN{s=(z>1)?z:1; printf "%.6f", s/z}')
+        ZMAX=$(awk -v s="$ZSTART" -v e="$ZEND" 'BEGIN{printf "%.6f", (s>e)?s:e}')
+        ZOOM_VF="zoompan=z='${ZSTART}+(${ZEND}-${ZSTART})*in/${FRAMES}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${CWID}x${CHGT}:fps=30,"
+        echo "    ズーム補正: 倍率 ${ZSTART} → ${ZEND} (${FRAMES}フレームかけて)"
+      fi
+
+      # 【切り出す枠の大きさ】
+      # 平行移動ぶんに加えて、ズーム補正で内側に寄るぶんの余白も確保する
+      ZPAD=$(awk -v zm="$ZMAX" -v w="$CWID" 'BEGIN{printf "%d", w*(zm-1)/2}')
+      ZPADY=$(awk -v zm="$ZMAX" -v h="$CHGT" 'BEGIN{printf "%d", h*(zm-1)/2}')
+      MARGIN=6
+      CW=$(( (CWID - ABSX - ZPAD*2 - MARGIN*2) / 2 * 2 ))
+      CH=$(( (CHGT - ABSY - ZPADY*2 - MARGIN*2) / 2 * 2 ))
+      XMAX=$(( CWID - CW )); YMAX=$(( CHGT - CH ))
+
+      # 動く方向を考え、枠内に収まる位置から始める
+      if [ "$DX" -lt 0 ]; then SX=$XMAX; else SX=0; fi
+      if [ "$DY" -lt 0 ]; then SY=$YMAX; else SY=0; fi
+
+      PCT=$(awk -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.1f", (w/cw-1)*100}')
+
+      # 2回目以降は、切り取りすぎないよう上限を守る
+      if [ "$pass" -gt 1 ] && awk -v c="$CUM_ZOOM" -v w="$CWID" -v cw="$CW" -v lim="$DRIFT_MAX_TOTAL_ZOOM" \
+           'BEGIN{exit !(c*(w/cw) > lim)}'; then
+        echo "  クリップ$((i+1)): これ以上補正すると画角を削りすぎるため、ここで止めます"
+        echo "    (残り x=${DX}px y=${DY}px ズーム${ZPCT}%)"
+        break
+      fi
+
+      echo "  クリップ$((i+1)) ${pass}回目: ドリフト x=${DX}px y=${DY}px ズーム${ZPCT}% → 拡大${PCT}%で打ち消します"
+
+      # 悪化したときに戻せるよう、補正前の状態を控えておく
+      cp "stage_clip_$i.mp4" "stage_prev_$i.mp4"
+      CUM_ZOOM_PREV="$CUM_ZOOM"
+      PREV_MAG="$MAG"
+
+      # 【二段階で打ち消す】
+      #   1. zoompan でズームを打ち消す
+      #   2. crop で平行移動を打ち消す
+      # 一度に書くとffmpegが受け付けないため、フィルタを順に並べる。
+      if ffmpeg -y -i "stage_clip_$i.mp4" \
+           -vf "${ZOOM_VF}crop=${CW}:${CH}:x='clip(${SX}+(${DX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${DY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
+           -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_fix_$i.mp4" 2>"err_drift_$i.log"; then
+        mv "stage_fix_$i.mp4" "stage_clip_$i.mp4"
+        # 導入部に同じだけ拡大をかけるため、削った量を掛け合わせて覚えておく
+        CUM_ZOOM=$(awk -v c="$CUM_ZOOM" -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.6f", c*(w/cw)}')
+      else
+        echo "    補正に失敗したため、そのまま使います"
+        tail -5 "err_drift_$i.log" 2>/dev/null || true
+        break
+      fi
+    done
+
+    if awk -v c="$CUM_ZOOM" 'BEGIN{exit !(c > 1.0005)}'; then
+      DRIFT_ZOOM_PCT=$(awk -v c="$CUM_ZOOM" 'BEGIN{printf "%.1f", (c-1)*100}')
+      echo "  クリップ$((i+1)): 合計${DRIFT_ZOOM_PCT}%拡大しました"
     fi
   done
 fi
@@ -374,54 +532,18 @@ fi
 # そこで末尾と先頭をクロスフェードで溶かし合わせ、
 # 「終わりの画=始まりの画」となる完全ループを作る。
 #
-#   [本体][末尾が先頭へ溶けていく]
-#    → 継ぎ目が原理的に存在しなくなる
-#
-# 湯気・水面・星の瞬きは形の定まらない被写体なので、
-# 数秒のディゾルブは自然な動きにしか見えない。
-# カメラのドリフトが残っていても、跳ぶのではなく柔らかく溶けるため目立たない。
-#
-# ループの継ぎ目を溶かす秒数
-# 長いほど繋ぎ目が分かりにくくなるが、その分ループ周期が短くなる
-# ループの継ぎ目を溶かす秒数
-#
-# 【長くしている理由】
-# LTXはカメラを固定しろと指示しても必ずドリフトする。
-# vidstabで打ち消そうとすると拡大が必要になり、画角が削られる。
-# end_image_urlで固定すると湯や湯気まで止まってしまう。
-#
-# そこで発想を変え、ドリフトはそのまま残して
-# 「継ぎ目を長く溶かす」ことで、位置の戻りを時間に分散させる。
-# 6秒かけて溶ければ、カクッとした飛びではなく
-# ゆっくりした揺り戻しとして知覚される。
-#
-#   3 … 継ぎ目が短い(現在)
-#   6 … 戻りを引き伸ばす案。カクッは減ったが、ずれた2枚が長時間重なるため
-#        建物の柱や庇の輪郭が二重に見えてしまい、かえって目立った
-#
-# 結局「ずれを時間で誤魔化す」のは無理があり、
-# vidstabでずれ自体を消す方針に戻した。
-# ※長くするほどループ周期は短くなる(15.3秒 − この値)
-# 【1秒にしている理由】
-# ループの継ぎ目は、末尾と先頭をこの秒数だけ重ねて溶かしている。
+# 【1秒→0秒にした理由】
 # 重なっている間は2枚の映像が同時に見えるため、
 #   ・建物の輪郭が二重に見える(残像)
 #   ・湯気が2枚ぶん見えて量が増える
 # という副作用がある。長いほどこれが目立つ。
 #
-# 以前は3秒にしていたが、それはカメラのドリフトによる位置ずれを
-# 時間をかけて誤魔化す必要があったため。
-# ドリフトを実測して打ち消す方式に変えた結果、ずれは0pxになったので、
-# 重ねる必要がなくなった。最小限の1秒に縮める。
+# ドリフトを実測して打ち消す方式に変えた結果、位置のずれは
+# ほぼ無くなったので、重ねる必要がなくなった。
 #
 #   3秒 … ずれを誤魔化していた頃の値。残像と湯気の増減が目立つ
 #   1秒 … 短くしたが、それでも重なりによる残像がわずかに残った
 #   0秒 … 重ねずに直結する(現在)
-#
-# 【0でつながる理由】
-# ループ用クリップは「先頭と末尾が同じ絵になるよう」ドリフトを打ち消してある。
-# 位置が完全に一致しているなら、重ねて溶かす必要はなく、
-# そのまま繋いだほうが残像も湯気の増減も起こらない。
 XFADE_LOOP=0
 
 # 導入部とループの境目を溶かす秒数
@@ -429,10 +551,7 @@ XFADE_LOOP=0
 # ループの継ぎ目(XFADE_LOOP)とは別に設定する。
 # 導入部の終盤はカメラが停止しているため、長く溶かすと二重像が
 # 動かないまま居座り、「残像」として見えてしまう。
-# 1秒程度なら、残像と認識される前に切り替わりが終わる。
-# 導入部とループの境目を溶かす秒数
-#
-# 1秒だと変化が急で、境目が二重像として見えることがあったため2秒に延ばした。
+# 1秒だと変化が急で境目が見えたため2秒にしている。
 XFADE_INTRO=2
 
 # 導入部の冒頭から切り落とす秒数
@@ -553,9 +672,8 @@ fi
 
 # 導入部にかける拡大の指定を組み立てる
 #
-# 安定化でループ側が STABILIZE_ZOOM % 拡大されるため、導入部にも同じ倍率をかけて
+# ドリフト補正でループ側が拡大されるため、導入部にも同じ倍率をかけて
 # 切り替わる瞬間に画の大きさが変わらないようにする。
-# 安定化を行わなかった場合は拡大なし(空文字)。
 # 拡大率はクリップごとに実測したドリフト量から決まるので、
 # 補正時に記録した DRIFT_ZOOM_PCT を使う(補正しなかった場合は拡大なし)。
 if [ -n "${DRIFT_ZOOM_PCT:-}" ] && awk -v p="${DRIFT_ZOOM_PCT:-0}" 'BEGIN{exit !(p > 0.05)}'; then
@@ -590,16 +708,6 @@ echo "ループ部分: ${LOOP_DURATION}秒 / 1段階あたり: ${STAGE_DURATION}
 #
 #        [段階1本体][境目1][段階2本体][境目2][段階3本体]...
 #                    ↑ここだけxfadeで作る
-
-# 各段階について、本体部分の長さを求める
-#   先頭の段階  : 後ろの境目にだけ尺を取られる
-#   中間の段階  : 前後の境目に尺を取られる
-#   最後の段階  : 前の境目にだけ尺を取られる
-#
-# 【修正】このブロックのffmpegから 2>/dev/null を外した。
-# set -e が効いているため、失敗すると即座にスクリプトが終了するが、
-# 標準エラーを捨てていたせいで何のメッセージも残らず、
-# 40分の処理の途中で無言で死ぬ状態になっていた。
 echo "各段階の動画を用意します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   BEFORE=0
@@ -629,12 +737,6 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4"
 
     # 導入部の末尾を切り出して、ループの先頭と溶かし合わせる
-    #
-    # 【なぜループの継ぎ目とは別の秒数にするか】
-    # ループの継ぎ目(XFADE_LOOP)は長いほど滑らかになるが、
-    # 導入部との境目は長いほど「残像」が目立つ。
-    # 導入部の終盤はカメラが停止しているため、二重像が動かずに居座ってしまう。
-    # そのため境目だけを短くして、残像として認識される前に切り替え終える。
     INTRO_REAL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video.mp4)
     TAIL_FROM=$(awk "BEGIN{v=$INTRO_REAL - $XFADE_INTRO; if(v<0) v=0; print v}")
     # 冒頭カットぶんを差し引いた、実際に使う導入部の長さ
@@ -652,7 +754,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     fi
 
     # 【重要】導入部にもループと同じ拡大をかける。
-    # 安定化の拡大がループ側にだけ掛かると、切り替わる瞬間に画が一回り大きくなる。
+    # 補正の拡大がループ側にだけ掛かると、切り替わる瞬間に画が一回り大きくなる。
     if ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
          -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
          -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p "intro_tail.mp4" 2>"err_introtail.log" \
@@ -719,36 +821,8 @@ done
 # 本体とクロスフェードを順に連結する(再エンコードなし = 高速)
 ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
 
-# ---- レイヤー合成: 建物と空を静止画に固定する ----
-#
-# 【なぜ必要か】
-# LTXのクリップはカメラが必ずドリフトし、ループの継ぎ目で建物の輪郭がずれる。
-# vidstab(画角が削れる)・end_image_url(湯が止まる)・長いクロスフェード(二重像)、
-# どれも別の問題を生んだ。
-#
-# 【仕組み】Lo-fiアニメと同じ「動く部分だけを動かす」方式
-#   ベース   : stage1の静止画      … 建物・空・雲海。完全静止なのでずれようがない
-#   湯の領域 : LTXのループクリップ … Geminiが特定した座標だけ、ぼかしたマスクで重ねる
-#              水は形が不定形なので、領域内のドリフトも継ぎ目も知覚できない
-#   星       : ffmpegで明滅を描く  … LTXは輝度の変化を表現できないため
-#
-# LAYER_REGIONS(Geminiが返した領域JSON)と BASE_IMAGE_URL が
-# 渡されたときだけ動く。無ければ従来どおり。
 # ---- 静止画ベースのループを作る(手描きのループ動画と同じ発想) ----
 #
-# 【なぜこの方式か】
-# LTXが生成した動画はカメラが必ずドリフトし、後処理では消しきれなかった。
-# 一方、手作業でループ動画を作る人は「動かない背景」に「動くもの」を
-# 重ねて作っている。だからループも完璧だしカメラも動かない。
-#
-# ここでは同じことをする:
-#   背景   … stage1の静止画。完全静止なのでドリフトも歪みも起こりえない
-#   湯の落下 … Pexelsの流水素材を、Geminiが特定した石樋の位置に重ねる
-#   湯気     … 同じく水面に重ねる
-#   星       … ffmpegで明滅を描く
-#
-# 素材自体がループするので、継ぎ目も原理的に存在しない。
-# TikTok用の雨・雪と同じ手法を、画面全体ではなく領域限定で使っている。
 # 【無効にしている理由】
 # 静止画にPexelsの流水・湯気素材を重ねてループを作る方式を試したが、
 # 実写素材とAI画像の質感が合わず、貼り付けたように見えて使えなかった。
@@ -931,43 +1005,7 @@ elif [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v j
     fi
   fi
 
-  # 星の明滅を組み立てる(空の領域に小さな点を散らし、周期をずらして瞬かせる)
-  STAR_BOXES=""
-  if [ "$LAYER_OK" = true ]; then
-    SKY=$(echo "$LAYER_REGIONS" | jq -r '.sky // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
-    if [ -n "$SKY" ]; then
-      read SX SY SW SH <<< "$SKY"
-      STAR_COUNT=28
-      for ((s=1; s<=STAR_COUNT; s++)); do
-        # 固定シードの擬似乱数で、毎回同じ配置になるようにする(再現性のため)
-        #
-        # 【明滅の周期を1周期の約数にする】
-        # 合成は1周期分だけ行い、それをコピーで繰り返す方式にしたため、
-        # 星の周期が1周期を割り切らないと、繰り返しの継ぎ目で明滅が飛ぶ。
-        # 1周期に2〜6回瞬く形にして、必ず割り切れるようにする。
-        eval "$(awk -v i=$s -v sx=$SX -v sy=$SY -v sw=$SW -v sh=$SH -v P=$UNIT_DUR 'BEGIN{
-          srand(i*7919);
-          x=int(1920*(sx+rand()*sw)/100);
-          y=int(1080*(sy+rand()*sh*0.85)/100);
-          n=int(2+rand()*5);           # 1周期に2〜6回瞬く
-          p=P/n;                       # 周期は1周期の約数になる
-          ph=rand()*6.28;              # 位相をばらす
-          th=0.35+rand()*0.35;         # 点灯している時間の割合もばらす
-          printf "STX=%d; STY=%d; STP=%.4f; STPH=%.2f; STTH=%.2f", x, y, p, ph, th
-        }')"
-        STAR_BOXES="${STAR_BOXES}drawbox=x=${STX}:y=${STY}:w=2:h=2:color=white:t=fill:enable='gt(sin(2*PI*t/${STP}+${STPH}),${STTH})',"
-      done
-      echo "  星の明滅: ${STAR_COUNT}個を空の領域に配置"
-    fi
-  fi
-
   # 合成の実行
-  #
-  # 【1周期だけ合成してコピーで繰り返す】
-  # ループ部分は同じ映像の繰り返しなので、全長を合成する必要がない。
-  # 1周期(12秒前後)だけ合成し、残りは再エンコードなしのコピーで繰り返す。
-  # 全長を合成すると1時間版で80分以上かかり、GitHub Actionsが
-  # タイムアウトしていた(実際に20分で失敗した)。この方式なら17秒程度で済む。
   if [ "$LAYER_OK" = true ]; then
     LOOP_DUR_ALL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 loop_video.mp4)
 
@@ -979,6 +1017,28 @@ elif [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v j
     else
       UNIT_DUR="$LOOP_DUR_ALL"
       echo "  段階が複数あるため全長(${UNIT_DUR}秒)を合成します"
+    fi
+
+    # 星の明滅を組み立てる(空の領域に小さな点を散らし、周期をずらして瞬かせる)
+    STAR_BOXES=""
+    SKY=$(echo "$LAYER_REGIONS" | jq -r '.sky // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
+    if [ -n "$SKY" ]; then
+      read SX SY SW SH <<< "$SKY"
+      STAR_COUNT=28
+      for ((s=1; s<=STAR_COUNT; s++)); do
+        eval "$(awk -v i=$s -v sx=$SX -v sy=$SY -v sw=$SW -v sh=$SH -v P=$UNIT_DUR 'BEGIN{
+          srand(i*7919);
+          x=int(1920*(sx+rand()*sw)/100);
+          y=int(1080*(sy+rand()*sh*0.85)/100);
+          n=int(2+rand()*5);
+          p=P/n;
+          ph=rand()*6.28;
+          th=0.35+rand()*0.35;
+          printf "STX=%d; STY=%d; STP=%.4f; STPH=%.2f; STTH=%.2f", x, y, p, ph, th
+        }')"
+        STAR_BOXES="${STAR_BOXES}drawbox=x=${STX}:y=${STY}:w=2:h=2:color=white:t=fill:enable='gt(sin(2*PI*t/${STP}+${STPH}),${STTH})',"
+      done
+      echo "  星の明滅: ${STAR_COUNT}個を空の領域に配置"
     fi
 
     if [ -n "$STAR_BOXES" ]; then
@@ -1112,10 +1172,6 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 #   BGM_FADE_START: BGMが立ち上がり始める(戸へ向かって歩き出すあたり)
 #   INTRO_DURATION: 外に出た時点では音楽が満ちており、景色と一緒に音楽を味わえる
 
-# BGMのフェードインを始める時刻
-#
-# ※効果音がある場合は、下の「空間変化」方式が優先される。
-#   この値は空間変化に失敗したときのフォールバックと、BGMのみの場合に使う。
 # 冒頭カット後、実際に画面に出る導入部の長さ
 # 音の切り替わり(室内→屋外)はこの秒数に合わせる
 INTRO_EFFECTIVE=$(awk "BEGIN{v=$INTRO_DURATION - $INTRO_HEAD_CUT - $INTRO_TAIL_CUT; if(v<3) v=$INTRO_DURATION - $INTRO_HEAD_CUT; print v}")
@@ -1130,8 +1186,6 @@ echo "音のタイミング基準: ${INTRO_EFFECTIVE}秒(指定${INTRO_DURATION}
 #   0秒から導入部いっぱい … 変化がゆるやかすぎて「開けた瞬間」を感じられない
 #   最後の4秒に集中       … 今度は切り替わりが急すぎた
 #   最後の8秒(現在)       … その中間。歩きながら少しずつ開けていく感じになる
-#
-# もっとゆっくりにしたいなら数字を大きく、はっきりさせたいなら小さくする。
 OPEN_DURATION=8
 OPEN_START=$(awk "BEGIN{v=$INTRO_EFFECTIVE - $OPEN_DURATION; if(v<1) v=1; print v}")
 echo "音が開ける瞬間: ${OPEN_START}秒から${OPEN_DURATION}秒かけて室内→屋外へ(それまでは室内の音のまま)"
@@ -1155,25 +1209,15 @@ if [ "$HAS_AMBIENT" = true ]; then
   #           BGM側の低域を削る必要はなく、むしろ低〜中低域を残して土台にする。
   #           代わりに水の弾ける音が聴こえるよう、BGMの2〜5kHzを少し下げる。
   #           環境音側は80Hz以下を削り、BGMのパッドをクリアに響かせる。
-  #
-  # ※PARTICLE_KEY は render.yml から環境変数として渡される。
-  #   未指定のときは雨・波向けの設定(*)になる。
-
   case "$PARTICLE_KEY" in
     onsen)
       # 湯の音: BGMは低域を残し、水の弾ける帯域(2〜5kHz)だけ軽く譲る
       BGM_EQ="equalizer=f=3000:width_type=o:width=1.5:g=-2,aecho=0.8:0.9:50:0.2"
       # 環境音: 低域を削ってBGMの土台を邪魔しない
       #   loudnorm で音圧を一定に揃えてから音量を決める。
-      #   生成される効果音は素材ごとに音量がばらつくため、これがないと
-      #   「作った音によっては全く聴こえない」という事故が起きる。
       #   aecho の遅延を長め(120ms)にして、岩に囲まれた露天風呂の広がりを出す
-      #   (60msだと浴室のような狭い響きになる)
-      #
-      #   lowpass は距離感の表現で使うため、ここでは分けて持っておく
       AMBIENT_EQ_BASE="highpass=f=80,loudnorm=I=-20:TP=-2,aecho=0.8:0.88:120:0.35"
       AMBIENT_LOWPASS=8000
-      # 湯の音は雨のように鳴り続ける音ではないため、しっかり上げる
       AMBIENT_LOOP_VOLUME=0.40
       ;;
     *)
@@ -1188,26 +1232,8 @@ if [ "$HAS_AMBIENT" = true ]; then
 
   # BGM: 室内では編成が薄く、外に出ると開けるように変化させる
   #
-  # 【設計】
-  # 導入部で別の曲を流すと、切り替わる瞬間に「曲が変わった」と分かってしまう。
-  # そこで同じ曲のまま、室内にいるあいだは音を削っておく。
-  #
-  #   室内: 高域を落とす → 琴の粒立ちや倍音が消え、パッドと低域だけが残る
-  #         響きを増やす → 隣の部屋から漏れ聴こえるような距離感になる
-  #         音量を絞る
-  #   屋外: 削っていた帯域が戻り、音量も上がる
-  #
   # 曲そのものは変わっていないのに、戸を開けた瞬間に楽器が増えたように聴こえる。
   # 「同じ音楽が空間ごと広がる」体験になり、繋ぎ目が生まれない。
-  #
-  # ※効果音の距離変化と同じ2本方式。lowpassは時間で変化させられないため、
-  #   こもった版と開けた版を別々に作って入れ替える。
-  # 【調整の経緯】
-  # 当初は 1800Hz / 音量0.32 にしていたが、冒頭のBGMが控えめすぎた。
-  # YouTube以外(Shorts・TikTok)にも載せることを考えると、
-  # 冒頭からしっかり音楽が聞こえたほうがよい。
-  # 帯域と音量を上げ、「小さい→大きい」ではなく
-  # 「そこそこ聞こえる→満ちる」という変化にする。
   BGM_INDOOR_LOWPASS=3000    # 室内で残す帯域の上限(下げるほど編成が薄く聴こえる)
   BGM_INDOOR_VOLUME=0.55     # 室内でのBGM音量(屋外は0.8)
   BGM_OPENING=$(awk "BEGIN{v=$INTRO_EFFECTIVE; if(v<3) v=3; print v}")
@@ -1241,30 +1267,14 @@ if [ "$HAS_AMBIENT" = true ]; then
 
   # 効果音: 導入部で「遠くから近づいてくる」ように変化させる
   #
-  # 【設計】
-  # カメラは室内の奥から歩き出し、戸を抜けて湯船のそばへ出る。
-  # それなのに最初から音が大きいと、距離感が映像と食い違ってしまう。
-  #
-  # 遠くの音は「小さい」だけでなく「高域が減衰してこもって聴こえる」。
+  # 遠い音は「小さい」だけでなく「高域が減衰してこもって聴こえる」。
   # 空気や壁が高い周波数から先に吸収するためで、音量だけを絞っても
   # 「近くで小さく鳴っている音」にしか聴こえない。
   #
-  # 【実装】
-  # 「遠い音」と「近い音」を別々に作り、導入部の長さをかけて入れ替える。
-  #   遠い音 … 1.2kHz以上を落としてこもらせ、音量も小さく
-  #   近い音 … 8kHzまで開けて水の弾ける音まで聴こえる、通常音量
-  # 【BGMと効果音は別扱いにする】
-  #
-  # BGMは冒頭から聞こえてほしい(どのプラットフォームでも掴みが要るため)ので
-  # 室内でも音量を上げてある。
-  #
-  # 一方、効果音は完全な無音から始める。
+  # 効果音は完全な無音から始める。
   # 導入部の開始位置は建物のいちばん奥で、露天風呂からかなり離れている。
   # そこで湯の音が聞こえるのは物理的におかしいため、
   # 戸に近づくにつれて初めて聞こえ始める形にする。
-  #   0.45 … BGMに合わせて上げた値(室内で聞こえすぎた)
-  #   0.18 … 気配は感じる程度。それでも遠すぎる場所では不自然
-  #   0    … 完全な無音から始める(現在)
   DIST_FAR_VOL=0
   echo "効果音の距離変化: 遠(${DIST_FAR_VOL}/こもり) → ${OPEN_START}秒から${OPEN_DURATION}秒で → 近(${AMBIENT_LOOP_VOLUME}/開け)"
 
