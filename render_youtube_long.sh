@@ -111,7 +111,16 @@ done
 #
 # ※この値を変えたら render.yml の LOOP_PERIOD も直すこと
 #   (Geminiの動画チェックが1周期分を切り出すのに使っている)
-LOOP_SPEED=0.4
+# 【切り分け中: 等速に戻してあります】
+#
+# カクつきの原因を確かめるため、いったん素の状態に戻す。
+#   1.0 … 等速。LTXが作ったまま流す。複製も補間も起きないので、
+#          ここでカクつかなければ原因は速度を落とす処理にある(現在)
+#   0.4 … 6秒→15秒。雲は落ち着くがカクつきの元になっていた疑いがある
+#
+# ここでもカクつく場合は、速度以外に原因があるということなので、
+# 生成されたクリップ自体を確認する必要がある。
+LOOP_SPEED=1.0
 
 # 遅くしたぶんの隙間を、どうやって埋めるか
 #
@@ -127,7 +136,8 @@ LOOP_SPEED=0.4
 #           1080p・15秒で6分ほどかかるが、動きが滑らかになる
 #   blend … 前後を重ねて埋める。5秒で終わるが、落ちる湯に二重像が出る
 #   dup   … 従来どおり複製で埋める(カクつく。比較用に残してある)
-LOOP_SLOWDOWN_MODE=mci
+# 等速のときは中間フレームを作る必要がないので dup のままでよい
+LOOP_SLOWDOWN_MODE=dup
 
 # ドリフト補正を使うかどうか
 #
@@ -137,7 +147,11 @@ LOOP_SLOWDOWN_MODE=mci
 # カクつきの原因は上の LOOP_SLOWDOWN_MODE 側だったが、
 # 万一まだ気になる場合は、ここを0にして比べれば
 # どちらが効いているかがはっきりする(追加費用はかからない)。
-DRIFT_CORRECTION_ENABLED=1
+# 【切り分け中: 補正も止めてあります】
+# ドリフト補正は切り取りと再エンコードを伴う。
+# まずは何もしていない状態で確かめるため、いったん止める。
+# カクつきが消えたら、ここを1に戻して次の要因を確かめる。
+DRIFT_CORRECTION_ENABLED=0
 
 # 【診断用】導入部とループクリップの解像度を記録しておく
 # 両者の縦横比が違うと、画面に収める際の拡大率が変わり、
@@ -320,11 +334,21 @@ def measure(cx, cy, rw, rh):
 
     return bdx + fx, bdy + fy, base, bs
 
-rw = int(W * 0.30)
-rh = int(H * 0.30)
-pts = [(W * 0.28, H * 0.28), (W * 0.72, H * 0.28),
-       (W * 0.28, H * 0.72), (W * 0.72, H * 0.72)]
-labels = ['左上', '右上', '左下', '右下']
+# ---- 測る場所 ----
+#
+# 【4隅の大きな領域から、小さな格子に変えた理由】
+# 領域が大きいと、その中のどこの模様が一致したかによって
+# 「画面中心からどれだけ離れた場所のずれか」が変わってしまう。
+# 模様が外寄りに偏っていると、実際より遠くのずれとして扱われ、
+# ズーム量が大きめに出る(検証で真値2.9%を3.5%と測った)。
+#
+# 小さな領域をたくさん取れば、この偏りは箇所ごとにばらけるため、
+# 当てはめの段階で打ち消し合う。
+GRID_X = [0.16, 0.34, 0.50, 0.66, 0.84]
+GRID_Y = [0.22, 0.50, 0.78]
+rw = int(W * 0.16)
+rh = int(H * 0.22)
+pts = [(W * gx, H * gy) for gy in GRID_Y for gx in GRID_X]
 
 # 判定のしきい値
 #   MIN_TEXTURE … これ未満は模様が乏しく、どこでも一致してしまうので信用しない
@@ -333,204 +357,272 @@ MIN_TEXTURE = 1.2
 MIN_GAIN = 0.98
 
 res = []
-for (cx, cy), label in zip(pts, labels):
+rejected_flat = 0
+rejected_still = 0
+for cx, cy in pts:
     dx, dy, base, bs = measure(cx, cy, rw, rh)
     ratio = (bs / base) if base > 0 else 1.0
     if base < MIN_TEXTURE:
-        verdict = '模様が乏しく不採用'
-        ok = False
+        rejected_flat += 1
+        res.append(None)
     elif ratio > MIN_GAIN:
-        verdict = '動いていません'
-        ok = False
+        rejected_still += 1
+        res.append(None)
     else:
-        verdict = '採用'
-        ok = True
-    print('    %s: dx=%+.1f dy=%+.1f  一致度 %.2f→%.2f (%.0f%%) %s'
-          % (label, dx, dy, base, bs, ratio * 100, verdict),
-          file=sys.stderr)
-    res.append((dx, dy) if ok else None)
+        res.append((dx, dy))
 
-valid = [r for r in res if r is not None]
-if not valid:
+adopted = sum(1 for r in res if r is not None)
+print('    測った%d箇所のうち %d箇所を採用(模様が乏しい %d / 動きなし %d)'
+      % (len(pts), adopted, rejected_flat, rejected_still), file=sys.stderr)
+
+# ---- 読めた領域から、平行移動とズームを同時に当てはめる ----
+#
+# 【なぜ平均と引き算をやめたか】
+# 以前は「4つの平均=平行移動」「外向きの広がり=ズーム」としていた。
+# これは4隅すべてが読めているときしか成り立たない。
+# 実際の素材では、水面のように動くものが乗った領域は読めずに外れる。
+# 3箇所しか読めないと、残った側に平均が引っ張られ、
+# 本当はズームなのに「平行移動がある」と誤判定してしまう。
+# (実素材のログで、存在しない6pxのパンを補正しようとしていた)
+#
+# 各領域のずれを「平行移動 + 中心から外向きの広がり」という式に
+# 最小二乗で当てはめれば、3箇所でも両方を正しく分離できる。
+#   dx = tx + s*(x - 中心x)
+#   dy = ty + s*(y - 中心y)     s が 0 なら等倍、正なら寄り、負なら引き
+U = []; V = []; DXS = []; DYS = []
+for (cx, cy), r in zip(pts, res):
+    if r is None:
+        continue
+    U.append(cx - W / 2.0)
+    V.append(cy - H / 2.0)
+    DXS.append(r[0])
+    DYS.append(r[1])
+
+def fit(U, V, DXS, DYS):
+    n = len(U)
+    Su = sum(U); Sv = sum(V)
+    Sdx = sum(DXS); Sdy = sum(DYS)
+    Suu = sum(u * u + v * v for u, v in zip(U, V))
+    Sud = sum(u * dx + v * dy for u, v, dx, dy in zip(U, V, DXS, DYS))
+    den = Suu - (Su * Su + Sv * Sv) / float(n)
+    if den <= 1e-6:
+        return Sdx / float(n), Sdy / float(n), 0.0
+    sc = (Sud - (Su * Sdx + Sv * Sdy) / float(n)) / den
+    return (Sdx - Su * sc) / float(n), (Sdy - Sv * sc) / float(n), sc
+
+n = len(U)
+if n == 0:
     print('    どの領域からも動きを読み取れませんでした', file=sys.stderr)
     print('0 0 1.0')
     raise SystemExit
 
-mdx = sum(r[0] for r in valid) / float(len(valid))
-mdy = sum(r[1] for r in valid) / float(len(valid))
-
-# ズームは4隅すべてが読めたときだけ求める
-# (一部だけだと「広がり」を正しく取り出せないため)
 zoom = 1.0
-if len(valid) == 4:
-    spread_x = ((res[1][0] - res[0][0]) + (res[3][0] - res[2][0])) / 2.0
-    spread_y = ((res[2][1] - res[0][1]) + (res[3][1] - res[1][1])) / 2.0
-    zx = 1 + spread_x / (W * 0.44)
-    zy = 1 + spread_y / (H * 0.44)
-    zoom = (zx + zy) / 2.0
-    print('    広がり: 横%+.1fpx 縦%+.1fpx → 倍率%.4f' % (spread_x, spread_y, zoom), file=sys.stderr)
+if n >= 3:
+    mdx, mdy, sc = fit(U, V, DXS, DYS)
+
+    # ---- 当てはめから大きく外れた箇所を捨てて、もう一度当てはめる ----
+    #
+    # 水面や湯気が乗った領域は、構造物とは別の方向に動いて見える。
+    # そのまま混ぜると平行移動の値が引っ張られ、実際には無いパンを
+    # 補正しようとしてしまう(実素材で存在しない6pxのパンが出た)。
+    # いったん当てはめた式からの外れ具合を見て、目立って外れたものを外す。
+    err = [abs(dx - (mdx + sc * u)) + abs(dy - (mdy + sc * v))
+           for u, v, dx, dy in zip(U, V, DXS, DYS)]
+    srt = sorted(err)
+    med = srt[len(srt) // 2]
+    limit = max(2.0, med * 2.5)
+    keep = [i for i, e in enumerate(err) if e <= limit]
+    if len(keep) >= 3 and len(keep) < n:
+        print('    当てはめから外れた%d箇所を除きます(水面や湯気の可能性)'
+              % (n - len(keep)), file=sys.stderr)
+        U = [U[i] for i in keep]; V = [V[i] for i in keep]
+        DXS = [DXS[i] for i in keep]; DYS = [DYS[i] for i in keep]
+        n = len(U)
+        mdx, mdy, sc = fit(U, V, DXS, DYS)
+
+    zoom = 1.0 + sc
+    print('    当てはめ(%d箇所): 平行移動 x=%+.1f y=%+.1f / 倍率%.4f'
+          % (n, mdx, mdy, zoom), file=sys.stderr)
     if zoom < 0.9 or zoom > 1.1:
         print('    倍率が異常なため無視します', file=sys.stderr)
         zoom = 1.0
 else:
-    print('    4隅のうち%d箇所しか読めなかったため、ズームは測りません' % len(valid), file=sys.stderr)
+    mdx = sum(DXS) / float(n)
+    mdy = sum(DYS) / float(n)
+    print('    %d箇所しか読めなかったため、平行移動だけ求めます' % n, file=sys.stderr)
 
 print('%d %d %.4f' % (int(round(mdx * SCALE)), int(round(mdy * SCALE)), zoom))
 DRIFTPY
 }
 
-# 補正を何回まで繰り返すか
+# 補正の強さの候補
 #
-# 【なぜ繰り返すのか】
-# ズーム量は「4隅のずれの差」から求めるため、測定にわずかな誤差が乗る。
-# 検証では3.0%のズームを3.4%と測り、そのぶん打ち消しすぎて
-# 逆向きに0.5%ほど残った。
-# 補正後にもう一度測って、残っていればもう一度打ち消せば、
-# 誤差の誤差まで小さくなり、しきい値以下に収まる。
-# 残りが基準以下なら1回で抜けるので、余計な再エンコードは起きない。
-DRIFT_MAX_PASSES=2
+# 【なぜ測った値をそのまま使わないのか】
+# ずれの測り方には、素材の模様の偏りによる誤差がどうしても残る。
+# 検証では、真値2.9%のズームを条件によって2.3%とも3.5%とも測った。
+# 補正フィルタ側の効き方にも同じくらいの幅がある。
+# 測った値を信じて一度で決めると、足りないか行き過ぎるかのどちらかになる。
+#
+# そこで強さを変えた候補をいくつか作り、それぞれ「残りのずれ」を測って
+# いちばん小さくなったものを採用する。
+# ループ候補3本から最良を選ぶのと同じ考え方で、
+# 推定の誤差そのものを避けられる。
+DRIFT_STRENGTHS="0.6 0.8 1.0 1.2"
 
-# 切り取ってよい上限(1.06 = 6%)
-#
-# 【なぜ歯止めが要るか】
-# 水や湯気のように形の変わるものが画面を占めていると、測定値が揺れる。
-# 検証で「模様そのものが動く映像」を通したところ、
-# 1回目で2.3%、2回目で3.1%と測り続け、累計8.5%も切り取ってしまった。
-# 補正のたびに画角が削られるので、際限なく繰り返させてはいけない。
-# 2回目以降はこの上限を超える補正を行わない。
-DRIFT_MAX_TOTAL_ZOOM=1.06
+# ズーム補正の上限(%)。これを超える値は測定の誤りとみなす
+DRIFT_MAX_ZOOM_PCT=4
+
+# ずれの大きさをひとつの数字にまとめる(px + ズーム%×10)
+drift_magnitude_() {
+  awk -v x="$1" -v y="$2" -v z="$3" \
+    'BEGIN{ax=(x<0)?-x:x; ay=(y<0)?-y:y; d=(z>1)?z-1:1-z; printf "%.1f", ax+ay+d*1000}'
+}
+
+# ドリフトを打ち消したクリップを作る
+#   $1=入力 $2=出力 $3=x方向(px) $4=y方向(px) $5=倍率
+#   成功したら標準出力に「拡大率(%)」を返す
+apply_drift_fix_() {
+  local IN="$1" OUT="$2" FDX="$3" FDY="$4" FDZ="$5"
+  local CD CWID CHGT CFPS ABSX ABSY ZOOM_VF ZMAX ZSTART ZEND FRAMES
+  local ZPAD ZPADY MARGIN CW CH XMAX YMAX SX SY PCT
+
+  CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$IN")
+  CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$IN")
+  CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$IN")
+
+  # 【元のフレームレートを必ず引き継ぐ】
+  # LTXのクリップは25fpsで出てくることがある。
+  # zoompanに fps=30 を渡すと、25枚ぶんの絵を30fpsとして貼り直すため、
+  # 中身が2割速くなって尺が縮む(実素材で6.1秒→5.1秒になった)。
+  # そのうえ補正の傾斜も伸びた尺で計算されるので、最後まで届かず効きが弱くなる。
+  # フレームレートの変換は、あとの中間フレーム生成にまかせる。
+  CFPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$IN" \
+         | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
+  if [ -z "$CFPS" ] || awk -v f="$CFPS" 'BEGIN{exit !(f<1)}'; then CFPS=30; fi
+
+  ABSX=$(awk -v v="$FDX" 'BEGIN{printf "%d", (v<0)?-v:v}')
+  ABSY=$(awk -v v="$FDY" 'BEGIN{printf "%d", (v<0)?-v:v}')
+
+  # 【ズーム補正の倍率】
+  #
+  # 末尾は先頭に対して FDZ 倍になっている。これを打ち消すには
+  # 時間とともに 1/FDZ 倍していけばよい。
+  # ただしzoompanは1未満の倍率を受け付けず1に丸めるため、
+  # 全体を持ち上げて常に1以上になるようにする。
+  #
+  #   ZSTART = max(1, FDZ)      ZEND = ZSTART / FDZ
+  #   FDZ<1(引いていく) … 1.0000 → 1/FDZ    FDZ>1(寄っていく) … FDZ → 1.0000
+  #
+  # 以前は常に FDZ → 1 としていたため、引いていく場合に1以下の範囲を
+  # 指定してしまい、フィルタが何もしていなかった。
+  # 「少しずつ引いていって周期の頭で戻る」症状が消えなかったのはこれが原因。
+  ZOOM_VF=""
+  ZMAX=1
+  if awk -v z="$FDZ" 'BEGIN{d=(z>1)?z-1:1-z; exit !(d>0.001)}'; then
+    FRAMES=$(awk -v d="$CD" -v f="$CFPS" 'BEGIN{printf "%d", d*f}')
+    ZSTART=$(awk -v z="$FDZ" 'BEGIN{printf "%.6f", (z>1)?z:1}')
+    ZEND=$(awk -v z="$FDZ" 'BEGIN{s=(z>1)?z:1; printf "%.6f", s/z}')
+    ZMAX=$(awk -v a="$ZSTART" -v b="$ZEND" 'BEGIN{printf "%.6f", (a>b)?a:b}')
+    ZOOM_VF="zoompan=z='${ZSTART}+(${ZEND}-${ZSTART})*in/${FRAMES}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${CWID}x${CHGT}:fps=${CFPS},"
+  fi
+
+  # 平行移動ぶんに加えて、ズーム補正で内側に寄るぶんの余白も確保する
+  ZPAD=$(awk -v zm="$ZMAX" -v w="$CWID" 'BEGIN{printf "%d", w*(zm-1)/2}')
+  ZPADY=$(awk -v zm="$ZMAX" -v h="$CHGT" 'BEGIN{printf "%d", h*(zm-1)/2}')
+  MARGIN=6
+  CW=$(( (CWID - ABSX - ZPAD*2 - MARGIN*2) / 2 * 2 ))
+  CH=$(( (CHGT - ABSY - ZPADY*2 - MARGIN*2) / 2 * 2 ))
+  if [ "$CW" -lt 320 ] || [ "$CH" -lt 180 ]; then return 1; fi
+  XMAX=$(( CWID - CW )); YMAX=$(( CHGT - CH ))
+
+  # 動く方向を考え、枠内に収まる位置から始める
+  if [ "$FDX" -lt 0 ]; then SX=$XMAX; else SX=0; fi
+  if [ "$FDY" -lt 0 ]; then SY=$YMAX; else SY=0; fi
+
+  PCT=$(awk -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.1f", (w/cw-1)*100}')
+
+  # 【二段階で打ち消す】
+  #   1. zoompan でズームを打ち消す
+  #   2. crop で平行移動を打ち消す
+  # 一度に書くとffmpegが受け付けないため、フィルタを順に並べる。
+  if ffmpeg -y -i "$IN" \
+       -vf "${ZOOM_VF}crop=${CW}:${CH}:x='clip(${SX}+(${FDX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${FDY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
+       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r "$CFPS" -an "$OUT" 2>"err_driftfix.log"; then
+    echo "$PCT"
+    return 0
+  fi
+  return 1
+}
 
 DRIFT_ZOOM_PCT=""
 if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
   echo "ループクリップのドリフトを測って打ち消します..."
   for ((i=0; i<CLIP_COUNT; i++)); do
-    CUM_ZOOM=1
-    CUM_ZOOM_PREV=1
-    PREV_MAG=""
+    echo "  クリップ$((i+1)) を測ります..."
+    DRIFT=$(measure_drift_ "stage_clip_raw_$i.mp4" | tail -1)
+    DX=$(echo "$DRIFT" | awk '{print ($1=="")?0:$1}')
+    DY=$(echo "$DRIFT" | awk '{print ($2=="")?0:$2}')
+    DZ=$(echo "$DRIFT" | awk '{print ($3=="")?1.0:$3}')
 
-    for ((pass=1; pass<=DRIFT_MAX_PASSES; pass++)); do
-      echo "  クリップ$((i+1)) ${pass}回目の測定..."
-      # 標準エラー(測定の途中経過)はログに流し、標準出力の最終行だけを受け取る
-      DRIFT=$(measure_drift_ "stage_clip_raw_$i.mp4" | tail -1)
-      DX=$(echo "$DRIFT" | awk '{print ($1=="")?0:$1}')
-      DY=$(echo "$DRIFT" | awk '{print ($2=="")?0:$2}')
-      DZ=$(echo "$DRIFT" | awk '{print ($3=="")?1.0:$3}')
+    # 測りすぎの歯止め
+    DZ=$(awk -v z="$DZ" -v m="$DRIFT_MAX_ZOOM_PCT" 'BEGIN{u=1+m/100; l=1-m/100; if(z>u)z=u; if(z<l)z=l; printf "%.4f", z}')
 
-      # 測りすぎの歯止め。4%を超えるズームは測定の誤りとみなして切り詰める
-      DZ=$(awk -v z="$DZ" 'BEGIN{if(z>1.04)z=1.04; if(z<0.96)z=0.96; printf "%.4f", z}')
+    ZPCT=$(awk -v z="$DZ" 'BEGIN{printf "%+.2f", (z-1)*100}')
+    HAS_ZOOM=$(awk -v z="$DZ" 'BEGIN{d=(z>1)?z-1:1-z; print (d>0.003)?1:0}')
+    HAS_PAN=$(awk -v x="$DX" -v y="$DY" 'BEGIN{ax=(x<0)?-x:x; ay=(y<0)?-y:y; print (ax>=2||ay>=2)?1:0}')
+    MAG0=$(drift_magnitude_ "$DX" "$DY" "$DZ")
 
-      # ズームが0.3%以上あるかどうか
-      HAS_ZOOM=$(awk -v z="$DZ" 'BEGIN{d=(z>1)?z-1:1-z; print (d>0.003)?1:0}')
-      ZPCT=$(awk -v z="$DZ" 'BEGIN{printf "%+.2f", (z-1)*100}')
+    if [ "$HAS_PAN" = "0" ] && [ "$HAS_ZOOM" = "0" ]; then
+      echo "  クリップ$((i+1)): 補正不要 (x=${DX}px y=${DY}px ズーム${ZPCT}%)"
+      continue
+    fi
 
-      # 平行移動は2px未満なら放っておく(1時間流しても知覚できない)
-      HAS_PAN=$(awk -v x="$DX" -v y="$DY" 'BEGIN{ax=(x<0)?-x:x; ay=(y<0)?-y:y; print (ax>=2||ay>=2)?1:0}')
+    echo "  クリップ$((i+1)): ドリフト x=${DX}px y=${DY}px ズーム${ZPCT}% (ずれの大きさ ${MAG0})"
+    echo "  強さを変えて試し、残りがいちばん小さいものを選びます"
 
-      # ずれの大きさをひとつの数字にまとめる(前回と比べて良くなったか判断するため)
-      MAG=$(awk -v x="$DX" -v y="$DY" -v z="$DZ" 'BEGIN{ax=(x<0)?-x:x; ay=(y<0)?-y:y; d=(z>1)?z-1:1-z; printf "%.2f", ax+ay+d*1000}')
+    BEST_MAG="$MAG0"
+    BEST_PCT=""
+    BEST_LABEL=""
+    rm -f "drift_best_$i.mp4"
 
-      if [ "$HAS_PAN" = "0" ] && [ "$HAS_ZOOM" = "0" ]; then
-        if [ "$pass" -eq 1 ]; then
-          echo "  クリップ$((i+1)): 補正不要 (x=${DX}px y=${DY}px ズーム${ZPCT}%)"
-        else
-          echo "  クリップ$((i+1)): 残り x=${DX}px y=${DY}px ズーム${ZPCT}% — 基準以下なのでここで止めます"
-        fi
-        break
+    for K in $DRIFT_STRENGTHS; do
+      KDX=$(awk -v v="$DX" -v k="$K" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
+      KDY=$(awk -v v="$DY" -v k="$K" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
+      KDZ=$(awk -v z="$DZ" -v k="$K" 'BEGIN{printf "%.4f", 1+(z-1)*k}')
+
+      PCT=$(apply_drift_fix_ "stage_clip_raw_$i.mp4" "cand_drift_$i.mp4" "$KDX" "$KDY" "$KDZ") || {
+        echo "    強さ${K}倍: 作成に失敗しました"
+        tail -3 err_driftfix.log 2>/dev/null || true
+        continue
+      }
+
+      # 候補の残りを測る(途中経過は出さず、結果だけ見る)
+      CAND=$(measure_drift_ "cand_drift_$i.mp4" 2>/dev/null | tail -1)
+      CDX=$(echo "$CAND" | awk '{print ($1=="")?0:$1}')
+      CDY=$(echo "$CAND" | awk '{print ($2=="")?0:$2}')
+      CDZ=$(echo "$CAND" | awk '{print ($3=="")?1.0:$3}')
+      CMAG=$(drift_magnitude_ "$CDX" "$CDY" "$CDZ")
+      CZPCT=$(awk -v z="$CDZ" 'BEGIN{printf "%+.2f", (z-1)*100}')
+
+      MARK=""
+      if awk -v a="$CMAG" -v b="$BEST_MAG" 'BEGIN{exit !(a < b)}'; then
+        cp "cand_drift_$i.mp4" "drift_best_$i.mp4"
+        BEST_MAG="$CMAG"
+        BEST_PCT="$PCT"
+        BEST_LABEL="$K"
+        MARK=" ←現時点で最良"
       fi
-
-      # 【前回より悪くなっていたら元に戻す】
-      # 測定が揺れている証拠なので、これ以上いじらないほうがよい。
-      if [ -n "$PREV_MAG" ] && awk -v a="$MAG" -v b="$PREV_MAG" 'BEGIN{exit !(a >= b)}'; then
-        echo "  クリップ$((i+1)): ${pass}回目の測定で悪化しました(${PREV_MAG}→${MAG})。前の状態に戻します"
-        [ -f "stage_prev_raw_$i.mp4" ] && mv "stage_prev_raw_$i.mp4" "stage_clip_raw_$i.mp4"
-        CUM_ZOOM="$CUM_ZOOM_PREV"
-        break
-      fi
-
-      CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_raw_$i.mp4")
-      CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "stage_clip_raw_$i.mp4")
-      CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "stage_clip_raw_$i.mp4")
-
-      ABSX=$(awk -v v="$DX" 'BEGIN{printf "%d", (v<0)?-v:v}')
-      ABSY=$(awk -v v="$DY" 'BEGIN{printf "%d", (v<0)?-v:v}')
-
-      # 【ズーム補正の倍率】
-      #
-      # 末尾は先頭に対して DZ 倍になっている。これを打ち消すには
-      # 時間とともに 1/DZ 倍していけばよい。
-      # ただしzoompanは1未満の倍率を受け付けず1に丸めるため、
-      # 全体を持ち上げて常に1以上になるようにする。
-      #
-      #   ZSTART = max(1, DZ)
-      #   ZEND   = ZSTART / DZ
-      #
-      #   DZ<1(カメラが引いていく) … 1.0000 → 1/DZ (1以上)
-      #   DZ>1(カメラが寄っていく) … DZ     → 1.0000 (1以上)
-      #
-      # 以前は常に DZ → 1 としていたため、引いていく場合に
-      # 1以下の範囲を指定してしまい、フィルタが何もしていなかった。
-      # 「少しずつ引いていって周期の頭で戻る」症状が消えなかったのはこのため。
-      ZOOM_VF=""
-      ZMAX=1
-      if [ "$HAS_ZOOM" = "1" ]; then
-        FRAMES=$(awk -v d="$CD" 'BEGIN{printf "%d", d*30}')
-        ZSTART=$(awk -v z="$DZ" 'BEGIN{printf "%.6f", (z>1)?z:1}')
-        ZEND=$(awk -v z="$DZ" 'BEGIN{s=(z>1)?z:1; printf "%.6f", s/z}')
-        ZMAX=$(awk -v s="$ZSTART" -v e="$ZEND" 'BEGIN{printf "%.6f", (s>e)?s:e}')
-        ZOOM_VF="zoompan=z='${ZSTART}+(${ZEND}-${ZSTART})*in/${FRAMES}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${CWID}x${CHGT}:fps=30,"
-        echo "    ズーム補正: 倍率 ${ZSTART} → ${ZEND} (${FRAMES}フレームかけて)"
-      fi
-
-      # 【切り出す枠の大きさ】
-      # 平行移動ぶんに加えて、ズーム補正で内側に寄るぶんの余白も確保する
-      ZPAD=$(awk -v zm="$ZMAX" -v w="$CWID" 'BEGIN{printf "%d", w*(zm-1)/2}')
-      ZPADY=$(awk -v zm="$ZMAX" -v h="$CHGT" 'BEGIN{printf "%d", h*(zm-1)/2}')
-      MARGIN=6
-      CW=$(( (CWID - ABSX - ZPAD*2 - MARGIN*2) / 2 * 2 ))
-      CH=$(( (CHGT - ABSY - ZPADY*2 - MARGIN*2) / 2 * 2 ))
-      XMAX=$(( CWID - CW )); YMAX=$(( CHGT - CH ))
-
-      # 動く方向を考え、枠内に収まる位置から始める
-      if [ "$DX" -lt 0 ]; then SX=$XMAX; else SX=0; fi
-      if [ "$DY" -lt 0 ]; then SY=$YMAX; else SY=0; fi
-
-      PCT=$(awk -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.1f", (w/cw-1)*100}')
-
-      # 2回目以降は、切り取りすぎないよう上限を守る
-      if [ "$pass" -gt 1 ] && awk -v c="$CUM_ZOOM" -v w="$CWID" -v cw="$CW" -v lim="$DRIFT_MAX_TOTAL_ZOOM" \
-           'BEGIN{exit !(c*(w/cw) > lim)}'; then
-        echo "  クリップ$((i+1)): これ以上補正すると画角を削りすぎるため、ここで止めます"
-        echo "    (残り x=${DX}px y=${DY}px ズーム${ZPCT}%)"
-        break
-      fi
-
-      echo "  クリップ$((i+1)) ${pass}回目: ドリフト x=${DX}px y=${DY}px ズーム${ZPCT}% → 拡大${PCT}%で打ち消します"
-
-      # 悪化したときに戻せるよう、補正前の状態を控えておく
-      cp "stage_clip_raw_$i.mp4" "stage_prev_raw_$i.mp4"
-      CUM_ZOOM_PREV="$CUM_ZOOM"
-      PREV_MAG="$MAG"
-
-      # 【二段階で打ち消す】
-      #   1. zoompan でズームを打ち消す
-      #   2. crop で平行移動を打ち消す
-      # 一度に書くとffmpegが受け付けないため、フィルタを順に並べる。
-      if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
-           -vf "${ZOOM_VF}crop=${CW}:${CH}:x='clip(${SX}+(${DX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${DY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
-           -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_fix_raw_$i.mp4" 2>"err_drift_$i.log"; then
-        mv "stage_fix_raw_$i.mp4" "stage_clip_raw_$i.mp4"
-        # 導入部に同じだけ拡大をかけるため、削った量を掛け合わせて覚えておく
-        CUM_ZOOM=$(awk -v c="$CUM_ZOOM" -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.6f", c*(w/cw)}')
-      else
-        echo "    補正に失敗したため、そのまま使います"
-        tail -5 "err_drift_$i.log" 2>/dev/null || true
-        break
-      fi
+      echo "    強さ${K}倍(拡大${PCT}%): 残り x=${CDX}px y=${CDY}px ズーム${CZPCT}% → ずれの大きさ ${CMAG}${MARK}"
     done
 
-    if awk -v c="$CUM_ZOOM" 'BEGIN{exit !(c > 1.0005)}'; then
-      DRIFT_ZOOM_PCT=$(awk -v c="$CUM_ZOOM" 'BEGIN{printf "%.1f", (c-1)*100}')
-      echo "  クリップ$((i+1)): 合計${DRIFT_ZOOM_PCT}%拡大しました"
+    rm -f "cand_drift_$i.mp4"
+
+    if [ -f "drift_best_$i.mp4" ]; then
+      mv "drift_best_$i.mp4" "stage_clip_raw_$i.mp4"
+      DRIFT_ZOOM_PCT="$BEST_PCT"
+      echo "  クリップ$((i+1)): 強さ${BEST_LABEL}倍を採用しました(ずれの大きさ ${MAG0} → ${BEST_MAG} / 拡大${BEST_PCT}%)"
+    else
+      echo "  クリップ$((i+1)): どの強さでも改善しなかったため、補正せずそのまま使います"
     fi
   done
 fi
