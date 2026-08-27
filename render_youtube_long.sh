@@ -262,11 +262,17 @@ def score(dx, dy):
             sx, sy = x+dx, y+dy
             if 0 <= sx < w and 0 <= sy < h:
                 tot += abs(ap[x, y] - bp[sx, sy]); n += 1
-    return tot/n if n else 999
+    return tot/n if n else 9e9
 
 # --- 第1段階: 縮小版で大まかな位置を掴む(4px刻み) ---
-best, bdx, bdy = 999, 0, 0
-R = 12   # 縮小後の探索範囲(元解像度で±48px)
+best, bdx, bdy = 9e9, 0, 0
+# 縮上後の探索範囲。1/4に縮小しているので元解像度では±48px。
+#
+# 【広げすぎない理由】
+# R=24(±96px)まで広げたところ、遠く離れた位置で偶然模様が一致し、
+# ドリフトのない映像を「62pxずれている」と誤判定した。
+# LTXのドリフトは12秒で数十px程度なので、±48pxで足りる。
+R = 12
 for dy in range(-R, R+1):
     for dx in range(-R, R+1):
         s = score(dx, dy)
@@ -280,22 +286,35 @@ try:
     fb = Image.open('drift_b_full.png').convert('L')
     fw, fh = fa.size
     fap, fbp = fa.load(), fb.load()
-    fmx, fmy = int(fw*0.25), int(fh*0.25)
-    fmw, fmh = int(fw*0.5), int(fh*0.5)
+    # 【測る範囲を広げ、細かく見る理由】
+    # 中央50%・6px飛ばしでは、建物の柱のような細い輪郭を捉えきれず
+    # 1px単位のずれが残っていた。
+    # 範囲を70%に広げ、3px飛ばしにして精度を上げる。
+    # サンプル数は約4倍になるが、測定は1クリップにつき1回なので影響は小さい。
+    fmx, fmy = int(fw*0.15), int(fh*0.15)
+    fmw, fmh = int(fw*0.7), int(fh*0.7)
 
     def fscore(dx, dy):
         tot = n = 0
-        for y in range(fmy, fmy+fmh, 6):
-            for x in range(fmx, fmx+fmw, 6):
+        for y in range(fmy, fmy+fmh, 3):
+            for x in range(fmx, fmx+fmw, 3):
                 sx, sy = x+dx, y+dy
                 if 0 <= sx < fw and 0 <= sy < fh:
+                    # 【平均差を使う理由】
+                    # 二乗誤差も試したが、湯気のように大きく変化する部分が
+                    # 強調されすぎて、まったく違う位置を「一致」と誤判定した
+                    # (2pxのずれを54pxと誤検出した)。平均差のほうが安定する。
                     tot += abs(fap[x, y] - fbp[sx, sy]); n += 1
-        return tot/n if n else 999
+        return tot/n if n else 9e9
 
+    # 縮小版の推定を中心に、その周辺を1px刻みで探す。
+    # 縮小版は4px刻みなので誤差は最大±4pxだが、
+    # 二乗誤差は谷が鋭いぶん局所解に落ちやすいので、
+    # 余裕をみて±6pxまで見る。
     cx, cy = bdx*4, bdy*4
-    fbest, fdx, fdy = 999, cx, cy
-    for dy in range(cy-4, cy+5):
-        for dx in range(cx-4, cx+5):
+    fbest, fdx, fdy = 9e9, cx, cy
+    for dy in range(cy-6, cy+7):
+        for dx in range(cx-6, cx+7):
             s = fscore(dx, dy)
             if s < fbest:
                 fbest, fdx, fdy = s, dx, dy
@@ -317,10 +336,10 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
     # 映像には湯気や水面の動きがあるため、測定には1px程度の揺らぎが出る。
     # ドリフトのない素材でも1pxと出ることがあり、それを補正しても意味がない。
     # 一方2px以上のずれは12秒ごとの「カクッ」として知覚されるので補正する。
-    ADX=$(awk -v v="$DX" 'BEGIN{printf "%d", (v<0)?-v:v}')
-    ADY=$(awk -v v="$DY" 'BEGIN{printf "%d", (v<0)?-v:v}')
-    if [ "$ADX" -le 1 ] && [ "$ADY" -le 1 ]; then
-      echo "  クリップ$((i+1)): ドリフトはほぼありません(x=${DX}px y=${DY}px)"
+    # 測定精度を上げたので、1pxのずれも補正する。
+    # 12秒ごとに1pxでも戻ると、直線の多い建物では気づかれることがある。
+    if [ "$DX" = "0" ] && [ "$DY" = "0" ]; then
+      echo "  クリップ$((i+1)): ドリフトはありません"
       continue
     fi
 
@@ -403,8 +422,14 @@ fi
 # 重ねる必要がなくなった。最小限の1秒に縮める。
 #
 #   3秒 … ずれを誤魔化していた頃の値。残像と湯気の増減が目立つ
-#   1秒 … ドリフトが消えたので十分(現在)
-XFADE_LOOP=1
+#   1秒 … 短くしたが、それでも重なりによる残像がわずかに残った
+#   0秒 … 重ねずに直結する(現在)
+#
+# 【0でつながる理由】
+# ループ用クリップは「先頭と末尾が同じ絵になるよう」ドリフトを打ち消してある。
+# 位置が完全に一致しているなら、重ねて溶かす必要はなく、
+# そのまま繋いだほうが残像も湯気の増減も起こらない。
+XFADE_LOOP=0
 
 # 導入部とループの境目を溶かす秒数
 #
@@ -447,6 +472,19 @@ echo "クリップをシームレスループに加工します..."
 for ((i=0; i<CLIP_COUNT; i++)); do
   CLIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
   BODY_END=$(awk "BEGIN{print $CLIP_DUR - $XFADE_LOOP}")
+
+  # 【XFADE_LOOP=0 のとき】
+  # 重ねる処理(xfade)は長さ0では動かない。
+  # ドリフトを打ち消して先頭と末尾が一致しているなら、
+  # 加工せずそのまま繋げばよいので、クリップをそのまま使う。
+  if awk "BEGIN{exit !($XFADE_LOOP < 0.01)}"; then
+    cp "stage_clip_$i.mp4" "stage_loop_$i.mp4"
+    LOOP_DUR="$CLIP_DUR"
+    SEAMLESS_DUR="$LOOP_DUR"
+    LOOP_HEAD_FILE=""
+    echo "  クリップ$((i+1)): 重ねずにそのまま繋ぎます(${CLIP_DUR}秒)"
+    continue
+  fi
 
   if ffmpeg -y -i "stage_clip_$i.mp4" -filter_complex \
       "[0:v]trim=start=${XFADE_LOOP}:end=${BODY_END},setpts=PTS-STARTPTS[main];\
