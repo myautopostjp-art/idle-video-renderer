@@ -113,6 +113,32 @@ done
 #   (Geminiの動画チェックが1周期分を切り出すのに使っている)
 LOOP_SPEED=0.4
 
+# 遅くしたぶんの隙間を、どうやって埋めるか
+#
+# 【これがカクつきの正体だった】
+# 以前は setpts で引き伸ばしたあと fps=30 に合わせるだけだった。
+# これは足りないフレームを「直前のフレームの複製」で埋める処理で、
+# 0.4倍だと1枚を2回・3回と交互に繰り返すことになる。
+# 実測すると出来上がったクリップの6割が直前とまったく同じフレームで、
+# 動きは毎秒30回ではなく12回しか進まない。しかも刻みが不均等なため、
+# ループ部分がずっとカクカクして見えていた。
+#
+#   mci   … 前後のフレームから動きを読み取り、本当の中間フレームを作る(既定)
+#           1080p・15秒で6分ほどかかるが、動きが滑らかになる
+#   blend … 前後を重ねて埋める。5秒で終わるが、落ちる湯に二重像が出る
+#   dup   … 従来どおり複製で埋める(カクつく。比較用に残してある)
+LOOP_SLOWDOWN_MODE=mci
+
+# ドリフト補正を使うかどうか
+#
+# 1 … 使う(既定)。周期ごとの拡大・平行移動を打ち消す
+# 0 … 使わない。補正の影響を切り分けたいときにここを0にする
+#
+# カクつきの原因は上の LOOP_SLOWDOWN_MODE 側だったが、
+# 万一まだ気になる場合は、ここを0にして比べれば
+# どちらが効いているかがはっきりする(追加費用はかからない)。
+DRIFT_CORRECTION_ENABLED=1
+
 # 【診断用】導入部とループクリップの解像度を記録しておく
 # 両者の縦横比が違うと、画面に収める際の拡大率が変わり、
 # 切り替わる瞬間に画が広がったように見えてしまう
@@ -122,21 +148,6 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p
 for ((i=0; i<CLIP_COUNT; i++)); do
   echo -n "  ループクリップ$((i+1)): "
   ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "stage_clip_raw_$i.mp4" || true
-done
-
-echo "ループクリップの再生速度を${LOOP_SPEED}倍に落とします(雲の流れを導入部に合わせるため)..."
-for ((i=0; i<CLIP_COUNT; i++)); do
-  if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
-       -vf "setpts=PTS/${LOOP_SPEED},fps=30" -an \
-       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed_$i.log"; then
-    RAW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_raw_$i.mp4")
-    NEW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
-    echo "  クリップ$((i+1)): ${RAW_DUR}秒 → ${NEW_DUR}秒"
-  else
-    cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
-    echo "  クリップ$((i+1)): 速度変更に失敗したため、そのまま使います"
-    tail -3 "err_speed_$i.log" || true
-  fi
 done
 
 # vidstabはもう使っていない(ドリフトは実測して線形に打ち消す方式に変更)。
@@ -400,7 +411,7 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
     for ((pass=1; pass<=DRIFT_MAX_PASSES; pass++)); do
       echo "  クリップ$((i+1)) ${pass}回目の測定..."
       # 標準エラー(測定の途中経過)はログに流し、標準出力の最終行だけを受け取る
-      DRIFT=$(measure_drift_ "stage_clip_$i.mp4" | tail -1)
+      DRIFT=$(measure_drift_ "stage_clip_raw_$i.mp4" | tail -1)
       DX=$(echo "$DRIFT" | awk '{print ($1=="")?0:$1}')
       DY=$(echo "$DRIFT" | awk '{print ($2=="")?0:$2}')
       DZ=$(echo "$DRIFT" | awk '{print ($3=="")?1.0:$3}')
@@ -431,14 +442,14 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
       # 測定が揺れている証拠なので、これ以上いじらないほうがよい。
       if [ -n "$PREV_MAG" ] && awk -v a="$MAG" -v b="$PREV_MAG" 'BEGIN{exit !(a >= b)}'; then
         echo "  クリップ$((i+1)): ${pass}回目の測定で悪化しました(${PREV_MAG}→${MAG})。前の状態に戻します"
-        [ -f "stage_prev_$i.mp4" ] && mv "stage_prev_$i.mp4" "stage_clip_$i.mp4"
+        [ -f "stage_prev_raw_$i.mp4" ] && mv "stage_prev_raw_$i.mp4" "stage_clip_raw_$i.mp4"
         CUM_ZOOM="$CUM_ZOOM_PREV"
         break
       fi
 
-      CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
-      CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "stage_clip_$i.mp4")
-      CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "stage_clip_$i.mp4")
+      CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_raw_$i.mp4")
+      CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "stage_clip_raw_$i.mp4")
+      CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "stage_clip_raw_$i.mp4")
 
       ABSX=$(awk -v v="$DX" 'BEGIN{printf "%d", (v<0)?-v:v}')
       ABSY=$(awk -v v="$DY" 'BEGIN{printf "%d", (v<0)?-v:v}')
@@ -496,7 +507,7 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
       echo "  クリップ$((i+1)) ${pass}回目: ドリフト x=${DX}px y=${DY}px ズーム${ZPCT}% → 拡大${PCT}%で打ち消します"
 
       # 悪化したときに戻せるよう、補正前の状態を控えておく
-      cp "stage_clip_$i.mp4" "stage_prev_$i.mp4"
+      cp "stage_clip_raw_$i.mp4" "stage_prev_raw_$i.mp4"
       CUM_ZOOM_PREV="$CUM_ZOOM"
       PREV_MAG="$MAG"
 
@@ -504,10 +515,10 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
       #   1. zoompan でズームを打ち消す
       #   2. crop で平行移動を打ち消す
       # 一度に書くとffmpegが受け付けないため、フィルタを順に並べる。
-      if ffmpeg -y -i "stage_clip_$i.mp4" \
+      if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
            -vf "${ZOOM_VF}crop=${CW}:${CH}:x='clip(${SX}+(${DX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${DY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
-           -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_fix_$i.mp4" 2>"err_drift_$i.log"; then
-        mv "stage_fix_$i.mp4" "stage_clip_$i.mp4"
+           -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_fix_raw_$i.mp4" 2>"err_drift_$i.log"; then
+        mv "stage_fix_raw_$i.mp4" "stage_clip_raw_$i.mp4"
         # 導入部に同じだけ拡大をかけるため、削った量を掛け合わせて覚えておく
         CUM_ZOOM=$(awk -v c="$CUM_ZOOM" -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.6f", c*(w/cw)}')
       else
@@ -523,6 +534,52 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
     fi
   done
 fi
+
+echo "ループクリップの再生速度を${LOOP_SPEED}倍に落とします(雲の流れを導入部に合わせるため)..."
+echo "  中間フレームの作り方: ${LOOP_SLOWDOWN_MODE}"
+for ((i=0; i<CLIP_COUNT; i++)); do
+  case "$LOOP_SLOWDOWN_MODE" in
+    mci)
+      SLOW_VF="setpts=PTS/${LOOP_SPEED},minterpolate=fps=30:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+      ;;
+    blend)
+      SLOW_VF="setpts=PTS/${LOOP_SPEED},minterpolate=fps=30:mi_mode=blend"
+      ;;
+    *)
+      SLOW_VF="setpts=PTS/${LOOP_SPEED},fps=30"
+      ;;
+  esac
+
+  if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
+       -vf "$SLOW_VF" -an \
+       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed_$i.log"; then
+    RAW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_raw_$i.mp4")
+    NEW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
+    echo "  クリップ$((i+1)): ${RAW_DUR}秒 → ${NEW_DUR}秒"
+  elif [ "$LOOP_SLOWDOWN_MODE" != "dup" ] && ffmpeg -y -i "stage_clip_raw_$i.mp4" \
+       -vf "setpts=PTS/${LOOP_SPEED},fps=30" -an \
+       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed2_$i.log"; then
+    echo "  クリップ$((i+1)): 中間フレームの生成に失敗したため、複製で埋める方式で作りました"
+    tail -3 "err_speed_$i.log" || true
+  else
+    cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
+    echo "  クリップ$((i+1)): 速度変更に失敗したため、そのまま使います"
+    tail -3 "err_speed_$i.log" || true
+  fi
+
+  # 【確認】隣り合うフレームがどれだけ同じかを数える
+  # 複製で埋める方式だと6割が同一フレームになり、それがカクつきの正体だった。
+  # 中間フレームが作れていれば、ここはほぼ0%になる。
+  DUP=$(ffmpeg -v error -i "stage_clip_$i.mp4" -vf "scale=160:90" -pix_fmt gray -f rawvideo - 2>/dev/null | \
+    python3 -c "
+import sys
+d=sys.stdin.buffer.read(); n=160*90
+f=[d[i*n:(i+1)*n] for i in range(len(d)//n)]
+s=sum(1 for i in range(1,len(f)) if f[i]==f[i-1])
+print('%d%%' % (s*100//max(1,len(f)-1)))
+" 2>/dev/null || echo "不明")
+  echo "  クリップ$((i+1)): 直前とまったく同じフレームの割合 ${DUP}(高いほどカクつきます)"
+done
 
 # ---- ①-3 クリップをシームレスループに加工する ----
 #
