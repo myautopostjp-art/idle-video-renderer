@@ -224,24 +224,26 @@ fi
 # 最も一致する位置を探す。そのずれ量がドリフト量になる。
 # ============================================================
 measure_drift_() {
-  # $1 = 動画ファイル / 出力: "DX DY" (末尾が先頭に対してずれている量)
+  # $1 = 動画ファイル / 出力: "DX DY ZOOM"
+  #   DX,DY = 末尾が先頭に対してずれている量(px)
+  #   ZOOM  = 末尾が先頭に対して何倍になっているか(1.0なら等倍)
+  #
+  # 【4分割で測る理由】
+  # 画面全体をひとつとして測ると平行移動しか分からない。
+  # 4隅それぞれの移動量を測れば、
+  #   4つの平均       = 平行移動
+  #   外向きの広がり  = ズーム
+  # として両方を同時に取り出せる。
+  # LTXのドリフトは「じわじわ引いていく」ズームを含むことがあり、
+  # 平行移動だけ直しても周期ごとの拡大が残っていた。
   local V="$1"
-  local D W H
+  local D
   D=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$V")
-  W=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$V")
-  H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$V")
   local LAST
   LAST=$(awk -v d="$D" 'BEGIN{v=d-0.1; if(v<0)v=0; printf "%.2f", v}')
 
-  # 【二段階で測る理由】
-  # 縮小して測ると処理は軽いが、縮小率の分だけ粗くなる。
-  # 1/4で測ると4px刻みになり、数pxのずれが「0」と判定されてしまう。
-  # 実際には2〜3pxのずれでも継ぎ目のカクッとして見えるため、
-  # まず縮小版で大まかな位置を掴み、次に原寸でその周辺を1px刻みで詰める。
-  ffmpeg -v error -ss 0 -i "$V" -frames:v 1 -vf "scale=iw/4:ih/4" -y drift_a.png 2>/dev/null || { echo "0 0"; return; }
-  ffmpeg -v error -ss "$LAST" -i "$V" -frames:v 1 -vf "scale=iw/4:ih/4" -y drift_b.png 2>/dev/null || { echo "0 0"; return; }
-  ffmpeg -v error -ss 0 -i "$V" -frames:v 1 -y drift_a_full.png 2>/dev/null || { echo "0 0"; return; }
-  ffmpeg -v error -ss "$LAST" -i "$V" -frames:v 1 -y drift_b_full.png 2>/dev/null || { echo "0 0"; return; }
+  ffmpeg -v error -ss 0 -i "$V" -frames:v 1 -y drift_a.png 2>/dev/null || { echo "0 0 1.0"; return; }
+  ffmpeg -v error -ss "$LAST" -i "$V" -frames:v 1 -y drift_b.png 2>/dev/null || { echo "0 0 1.0"; return; }
 
   python3 - <<'DRIFTPY'
 from PIL import Image
@@ -249,78 +251,50 @@ try:
     a = Image.open('drift_a.png').convert('L')
     b = Image.open('drift_b.png').convert('L')
 except Exception:
-    print("0 0"); raise SystemExit
-w, h = a.size
+    print("0 0 1.0"); raise SystemExit
+
+W, H = a.size
 ap, bp = a.load(), b.load()
-mx, my = int(w*0.25), int(h*0.25)
-mw, mh = int(w*0.5), int(h*0.5)
 
-def score(dx, dy):
-    tot = n = 0
-    for y in range(my, my+mh, 3):
-        for x in range(mx, mx+mw, 3):
-            sx, sy = x+dx, y+dy
-            if 0 <= sx < w and 0 <= sy < h:
-                tot += abs(ap[x, y] - bp[sx, sy]); n += 1
-    return tot/n if n else 9e9
+def measure(cx, cy, rw, rh):
+    """指定した領域が、末尾でどれだけ動いたかを測る"""
+    x0, y0 = int(cx - rw/2), int(cy - rh/2)
+    best, bdx, bdy, base = 9e9, 0, 0, None
+    for dy in range(-24, 25, 2):
+        for dx in range(-24, 25, 2):
+            tot = n = 0
+            for y in range(y0, y0+int(rh), 8):
+                for x in range(x0, x0+int(rw), 8):
+                    sx, sy = x+dx, y+dy
+                    if 0 <= sx < W and 0 <= sy < H:
+                        tot += abs(ap[x, y] - bp[sx, sy]); n += 1
+            if n:
+                s = tot/n
+                if dx == 0 and dy == 0: base = s
+                if s < best: best, bdx, bdy = s, dx, dy
+    # 模様の少ない領域では偶然どこかが一致してしまう。
+    # 一致度が十分に改善していなければ「動いていない」とみなす。
+    if base is not None and best > base * 0.6:
+        return 0, 0
+    return bdx, bdy
 
-# --- 第1段階: 縮小版で大まかな位置を掴む(4px刻み) ---
-best, bdx, bdy = 9e9, 0, 0
-# 縮上後の探索範囲。1/4に縮小しているので元解像度では±48px。
-#
-# 【広げすぎない理由】
-# R=24(±96px)まで広げたところ、遠く離れた位置で偶然模様が一致し、
-# ドリフトのない映像を「62pxずれている」と誤判定した。
-# LTXのドリフトは12秒で数十px程度なので、±48pxで足りる。
-R = 12
-for dy in range(-R, R+1):
-    for dx in range(-R, R+1):
-        s = score(dx, dy)
-        if s < best:
-            best, bdx, bdy = s, dx, dy
+qw, qh = W*0.3, H*0.3
+pts = [(W*0.28, H*0.28), (W*0.72, H*0.28), (W*0.28, H*0.72), (W*0.72, H*0.72)]
+res = [measure(cx, cy, qw, qh) for cx, cy in pts]
 
-# --- 第2段階: 原寸でその周辺を1px刻みで詰める ---
-# 数pxのずれでも継ぎ目のカクッとして見えるため、ここまで追い込む
-try:
-    fa = Image.open('drift_a_full.png').convert('L')
-    fb = Image.open('drift_b_full.png').convert('L')
-    fw, fh = fa.size
-    fap, fbp = fa.load(), fb.load()
-    # 【測る範囲を広げ、細かく見る理由】
-    # 中央50%・6px飛ばしでは、建物の柱のような細い輪郭を捉えきれず
-    # 1px単位のずれが残っていた。
-    # 範囲を70%に広げ、3px飛ばしにして精度を上げる。
-    # サンプル数は約4倍になるが、測定は1クリップにつき1回なので影響は小さい。
-    fmx, fmy = int(fw*0.15), int(fh*0.15)
-    fmw, fmh = int(fw*0.7), int(fh*0.7)
+mdx = sum(r[0] for r in res)/4.0
+mdy = sum(r[1] for r in res)/4.0
 
-    def fscore(dx, dy):
-        tot = n = 0
-        for y in range(fmy, fmy+fmh, 3):
-            for x in range(fmx, fmx+fmw, 3):
-                sx, sy = x+dx, y+dy
-                if 0 <= sx < fw and 0 <= sy < fh:
-                    # 【平均差を使う理由】
-                    # 二乗誤差も試したが、湯気のように大きく変化する部分が
-                    # 強調されすぎて、まったく違う位置を「一致」と誤判定した
-                    # (2pxのずれを54pxと誤検出した)。平均差のほうが安定する。
-                    tot += abs(fap[x, y] - fbp[sx, sy]); n += 1
-        return tot/n if n else 9e9
+# 左右・上下の広がりから倍率を求める
+spread_x = ((res[1][0]-res[0][0]) + (res[3][0]-res[2][0]))/2.0
+spread_y = ((res[2][1]-res[0][1]) + (res[3][1]-res[1][1]))/2.0
+zx = 1 + spread_x/(W*0.44)
+zy = 1 + spread_y/(H*0.44)
+zoom = (zx + zy)/2.0
+if zoom < 0.9 or zoom > 1.1:   # 明らかに異常な値は無視する
+    zoom = 1.0
 
-    # 縮小版の推定を中心に、その周辺を1px刻みで探す。
-    # 縮小版は4px刻みなので誤差は最大±4pxだが、
-    # 二乗誤差は谷が鋭いぶん局所解に落ちやすいので、
-    # 余裕をみて±6pxまで見る。
-    cx, cy = bdx*4, bdy*4
-    fbest, fdx, fdy = 9e9, cx, cy
-    for dy in range(cy-6, cy+7):
-        for dx in range(cx-6, cx+7):
-            s = fscore(dx, dy)
-            if s < fbest:
-                fbest, fdx, fdy = s, dx, dy
-    print(f"{fdx} {fdy}")
-except Exception:
-    print(f"{bdx*4} {bdy*4}")
+print(f"{int(round(mdx))} {int(round(mdy))} {zoom:.4f}")
 DRIFTPY
 }
 
@@ -331,14 +305,12 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
     DRIFT=$(measure_drift_ "stage_clip_$i.mp4" 2>/dev/null | tail -1)
     DX=$(echo "$DRIFT" | awk '{print ($1=="")?0:$1}')
     DY=$(echo "$DRIFT" | awk '{print ($2=="")?0:$2}')
+    DZ=$(echo "$DRIFT" | awk '{print ($3=="")?1.0:$3}')
 
-    # 【1pxは無視する】
-    # 映像には湯気や水面の動きがあるため、測定には1px程度の揺らぎが出る。
-    # ドリフトのない素材でも1pxと出ることがあり、それを補正しても意味がない。
-    # 一方2px以上のずれは12秒ごとの「カクッ」として知覚されるので補正する。
-    # 測定精度を上げたので、1pxのずれも補正する。
-    # 12秒ごとに1pxでも戻ると、直線の多い建物では気づかれることがある。
-    if [ "$DX" = "0" ] && [ "$DY" = "0" ]; then
+    # ズームが1%以上あるかどうか
+    HAS_ZOOM=$(awk -v z="$DZ" 'BEGIN{d=(z>1)?z-1:1-z; print (d>0.003)?1:0}')
+
+    if [ "$DX" = "0" ] && [ "$DY" = "0" ] && [ "$HAS_ZOOM" = "0" ]; then
       echo "  クリップ$((i+1)): ドリフトはありません"
       continue
     fi
@@ -349,9 +321,14 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
 
     ABSX=$(awk -v v="$DX" 'BEGIN{printf "%d", (v<0)?-v:v}')
     ABSY=$(awk -v v="$DY" 'BEGIN{printf "%d", (v<0)?-v:v}')
+
+    # 【切り出す枠の大きさ】
+    # 平行移動ぶんに加えて、ズームぶんの余白も確保する。
+    # 末尾がZ倍に広がっているなら、その分だけ内側を使えば打ち消せる。
+    ZPAD=$(awk -v z="$DZ" -v w="$CWID" 'BEGIN{d=(z>1)?z-1:1-z; printf "%d", w*d/2}')
     MARGIN=6
-    CW=$(( (CWID - ABSX - MARGIN*2) / 2 * 2 ))
-    CH=$(( (CHGT - ABSY - MARGIN*2) / 2 * 2 ))
+    CW=$(( (CWID - ABSX - ZPAD*2 - MARGIN*2) / 2 * 2 ))
+    CH=$(( (CHGT - ABSY - (ZPAD*CHGT/CWID)*2 - MARGIN*2) / 2 * 2 ))
     XMAX=$(( CWID - CW )); YMAX=$(( CHGT - CH ))
 
     # 動く方向を考え、枠内に収まる位置から始める
@@ -359,10 +336,26 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
     if [ "$DY" -lt 0 ]; then SY=$YMAX; else SY=0; fi
 
     PCT=$(awk -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.1f", (w/cw-1)*100}')
-    echo "  クリップ$((i+1)): ドリフト x=${DX}px y=${DY}px → 拡大${PCT}%で打ち消します"
+    ZPCT=$(awk -v z="$DZ" 'BEGIN{printf "%+.2f", (z-1)*100}')
+    echo "  クリップ$((i+1)): ドリフト x=${DX}px y=${DY}px ズーム${ZPCT}% → 拡大${PCT}%で打ち消します"
+
+    # 【二段階で打ち消す】
+    #   1. zoompan でズームを打ち消す
+    #      先頭をZ倍に拡大した状態から始め、末尾で等倍に戻す。
+    #      末尾がZ倍に広がっているので、これで相殺される。
+    #      (cropの式で枠の大きさを変える方法も試したが、
+    #       式が複雑すぎてffmpegが受け付けなかった)
+    #   2. crop で平行移動を打ち消す
+    #
+    # 一度に書くとエラーになるため、フィルタを順に並べる。
+    ZOOM_VF=""
+    if [ "$HAS_ZOOM" = "1" ]; then
+      FRAMES=$(awk -v d="$CD" 'BEGIN{printf "%d", d*30}')
+      ZOOM_VF="zoompan=z='${DZ}-(${DZ}-1)*in/${FRAMES}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${CWID}x${CHGT}:fps=30,"
+    fi
 
     if ffmpeg -y -i "stage_clip_$i.mp4" \
-         -vf "crop=${CW}:${CH}:x='clip(${SX}+(${DX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${DY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
+         -vf "${ZOOM_VF}crop=${CW}:${CH}:x='clip(${SX}+(${DX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${DY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
          -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_fix_$i.mp4" 2>"err_drift_$i.log"; then
       mv "stage_fix_$i.mp4" "stage_clip_$i.mp4"
       DRIFT_ZOOM_PCT="$PCT"
