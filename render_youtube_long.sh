@@ -111,18 +111,26 @@ done
 #
 # ※この値を変えたら render.yml の LOOP_PERIOD も直すこと
 #   (Geminiの動画チェックが1周期分を切り出すのに使っている)
-# 【切り分けの結果、0.4に戻しました】
+# ループクリップの再生速度
 #
-# 等速で確かめたところ、カクつきの原因は速度を落とす処理ではなく
-# ドリフト補正のほうだった(整数画素への丸めによる段差)。
-# 補正を6倍拡大してから行う方式に直したので、速度を戻して試す。
+# 【空を止めたので戻した】
+# 遅くしていたのは雲を落ち着かせるためだったが、
+# 空を固定した今はその必要がない。むしろ遅いままだと
+# 湯が「流れている」ではなく「垂れている」ように見える。
 #
-#   1.0 … 等速。雲と空が速く、早送りに見える
-#   0.4 … 6秒→15秒。雲が落ち着き、ループ周期も長くなる(現在)
-#   0.6 … 中間。補間の負担は軽いが、周期が10秒と短くなる
+#   1.0  … 等速。湯はいちばん自然だが、周期が6秒と短い
+#   0.6  … 6.1秒→10.2秒。湯は自然なまま、周期も倍になる(現在)
+#   0.4  … 6.1秒→15.3秒。周期は長いが湯がやや遅い
+#   0.3  … 湯が垂れて見え始める
+#
+# 【補間の負担】
+# 0.6なら25fpsの素材から実質15fps、30fpsを作るのに
+# 2枚に1枚が生成フレーム。0.3のときの4枚に3枚より格段に軽く、
+# にじみや歪みも出にくい。
 #
 # ※この値を変えたら render.yml の LOOP_PERIOD も直すこと
-LOOP_SPEED=0.4
+#   (0.6なら周期は約8秒 = 10.2秒 − 重ねる2秒)
+LOOP_SPEED=0.6
 
 # 遅くしたぶんの隙間を、どうやって埋めるか
 #
@@ -712,7 +720,6 @@ except Exception:
 " 2>/dev/null || echo "不明"
 }
 
-# ---- ①-3 クリップをシームレスループに加工する ----
 #
 # クリップをそのまま繰り返すと、最後のフレームから最初のフレームへ
 # 一瞬で切り替わる。位置が合っていても、6秒後の湯気や水面の形は
@@ -734,6 +741,153 @@ except Exception:
 #
 # ※重ねた秒数だけループ周期は短くなる(15.3秒 − この値)
 XFADE_LOOP=2
+
+# ---- ①-2c 空を止める ----
+#
+# 【なぜ止めるのか】
+# 雲を落ち着かせるために全体を遅くすると、湯まで遅くなって
+# 「流れている」ではなく「垂れている」ように見えてしまう。
+# 空だけを別の速度で流すことはできない(空だけ末尾と先頭がつながらなくなる)。
+#
+# しかし星空も雲海も、そもそも動く必要がない。止めてしまえば、
+# 遅くする理由がなくなり、湯は自然な速さのままにできる。
+# 止まった空はループも完璧に成立する。
+#
+# 【なぜ境目が見えないのか】
+# 貼り付けるのはクリップ自身の1コマ目。ドリフトを打ち消してあるので、
+# 建物・岩・稜線といった動かないものは、映像側と完全に同じ位置にある。
+# したがってマスクが構造物を横切っても、そこに差は生じない。
+# 差が出るのは動いているものだけ、つまり雲だけになる。
+#
+# 【湯気について】
+# 立ちのぼる湯気が空の領域まで届くと、そこで止まって見える。
+# 境目を柔らかくぼかしてあるので、上にいくほど薄れて消えるように見える。
+# 不自然なら SKY_FREEZE_HEIGHT を下げて、空の領域を狭くする。
+#
+#   0 … 止めない(従来どおり)
+#   1 … 止める(現在)
+SKY_FREEZE_ENABLED=1
+
+# 完全に止める高さ(画面上端からの割合 %)
+SKY_FREEZE_HEIGHT=32
+
+# その下の、徐々に映像へ戻していく帯の幅(%)
+SKY_FREEZE_FEATHER=14
+
+if [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]; then
+  echo "空を止めます(上から${SKY_FREEZE_HEIGHT}%を固定し、続く${SKY_FREEZE_FEATHER}%で映像に戻します)..."
+  for ((i=0; i<CLIP_COUNT; i++)); do
+    SW=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "stage_clip_$i.mp4")
+    SH=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "stage_clip_$i.mp4")
+    SY1=$(awk -v h="$SH" -v p="$SKY_FREEZE_HEIGHT" 'BEGIN{printf "%d", h*p/100}')
+    SFE=$(awk -v h="$SH" -v p="$SKY_FREEZE_FEATHER" 'BEGIN{printf "%d", h*p/100; }')
+    [ "$SFE" -lt 1 ] && SFE=1
+
+    # 1コマ目を取り出す(これが止まった空になる)
+    if ! ffmpeg -v error -y -ss 0 -i "stage_clip_$i.mp4" -frames:v 1 "sky_still_$i.png" 2>"err_sky_$i.log"; then
+      echo "  クリップ$((i+1)): 1コマ目を取り出せなかったため、空はそのままにします"
+      continue
+    fi
+
+    # 上が白(静止画を見せる)、下が黒(映像を見せる)のマスクを作る
+    if ! ffmpeg -v error -y -f lavfi -i "color=c=black:s=${SW}x${SH}" \
+         -vf "geq=lum='if(lt(Y,${SY1}),255,if(lt(Y,${SY1}+${SFE}),255*(1-(Y-${SY1})/${SFE}),0))'" \
+         -frames:v 1 "sky_mask_$i.png" 2>>"err_sky_$i.log"; then
+      echo "  クリップ$((i+1)): マスクを作れなかったため、空はそのままにします"
+      continue
+    fi
+
+    # 【尺を明示する】
+    # 静止画は -loop 1 で無限に供給されるため、尺を指定しないと
+    # 合成が永久に終わらない(実際に固まった)。
+    SKY_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
+    SKY_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "stage_clip_$i.mp4" \
+              | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
+    if [ -z "$SKY_FPS" ] || awk -v f="$SKY_FPS" 'BEGIN{exit !(f<1)}'; then SKY_FPS=30; fi
+
+    if ffmpeg -v error -y -i "stage_clip_$i.mp4" -loop 1 -i "sky_still_$i.png" -loop 1 -i "sky_mask_$i.png" \
+         -filter_complex "[1:v]format=rgba[st];[2:v]format=gray[m];[st][m]alphamerge[sa];[0:v]format=rgba[bs];[bs][sa]overlay=format=rgb,format=yuv420p[out]" \
+         -map "[out]" -t "$SKY_DUR" -r "$SKY_FPS" \
+         -c:v libx264 -preset veryfast -crf 23 -an "stage_sky_$i.mp4" 2>>"err_sky_$i.log"; then
+      mv "stage_sky_$i.mp4" "stage_clip_$i.mp4"
+      echo "  クリップ$((i+1)): 空を止めました(上${SY1}px を固定、続く${SFE}px でぼかし)"
+    else
+      echo "  クリップ$((i+1)): 空の固定に失敗したため、そのまま使います"
+      tail -5 "err_sky_$i.log" 2>/dev/null || true
+    fi
+  done
+fi
+
+# ---- ①-2d 止めた空に星の瞬きを描く ----
+#
+# 空を静止画で止めると、当然ながら星も完全に動かなくなる。
+# 夜空は瞬いているほうが生きて見えるので、光る点を重ねて補う。
+#
+# 【できること・できないこと】
+# 止めた空は写真なので、そこに写っている星そのものを光らせることはできない。
+# 別の点を上から重ねる形になる。2pxの点なので夜空では見分けがつかないが、
+# 元の星とは違う位置に現れる。
+#
+# 【周期はループ周期の約数にする】
+# ループ周期を割り切らない周期で瞬かせると、繰り返しの継ぎ目で
+# 明滅が不連続に飛んでしまう。1周期のあいだに2〜6回瞬く形にして、
+# 必ず割り切れるようにしている。
+#
+#   0 … 描かない
+#   1 … 描く(現在)
+SKY_TWINKLE_ENABLED=1
+
+# 描く星の数。多すぎると空が騒がしくなる
+SKY_TWINKLE_COUNT=40
+
+if [ "${SKY_TWINKLE_ENABLED:-0}" = "1" ] && [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]; then
+  echo "止めた空に星の瞬きを描きます(${SKY_TWINKLE_COUNT}個)..."
+  for ((i=0; i<CLIP_COUNT; i++)); do
+    TW_W=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "stage_clip_$i.mp4")
+    TW_H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "stage_clip_$i.mp4")
+    TW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
+    TW_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "stage_clip_$i.mp4" \
+             | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
+    if [ -z "$TW_FPS" ] || awk -v f="$TW_FPS" 'BEGIN{exit !(f<1)}'; then TW_FPS=30; fi
+
+    # 実際に繰り返される長さ(重ねる秒数を引いたもの)を周期の基準にする
+    TW_PERIOD=$(awk -v d="$TW_DUR" -v x="$XFADE_LOOP" 'BEGIN{v=d-x; if(v<1)v=d; printf "%.4f", v}')
+
+    # 星を置ける高さ(完全に止まっている範囲のみ。ぼかしの帯には置かない)
+    TW_TOP=$(awk -v h="$TW_H" -v p="$SKY_FREEZE_HEIGHT" 'BEGIN{printf "%d", h*p/100}')
+
+    TW_BOXES=""
+    for ((k=1; k<=SKY_TWINKLE_COUNT; k++)); do
+      eval "$(awk -v i=$k -v w="$TW_W" -v top="$TW_TOP" -v P="$TW_PERIOD" 'BEGIN{
+        srand(i*7919);
+        x=int(rand()*w);
+        y=int(rand()*top*0.95);
+        n=int(2+rand()*5);        # 1周期に2〜6回瞬く(必ず割り切れる)
+        p=P/n;
+        ph=rand()*6.28;           # 位相をばらす
+        th=0.30+rand()*0.40;      # 点いている時間の割合もばらす
+        g=int(170+rand()*85);     # 明るさもばらす(色は16進で渡す必要がある)
+        printf "TX=%d; TY=%d; TP=%.4f; TPH=%.2f; TTH=%.2f; TG=%02X", x, y, p, ph, th, g
+      }')"
+      TW_BOXES="${TW_BOXES}drawbox=x=${TX}:y=${TY}:w=2:h=2:color=0x${TG}${TG}${TG}:t=fill:enable='gt(sin(2*PI*t/${TP}+${TPH}),${TTH})',"
+    done
+
+    if ffmpeg -v error -y -i "stage_clip_$i.mp4" \
+         -f lavfi -i "color=c=black:s=${TW_W}x${TW_H}:d=${TW_DUR}:r=${TW_FPS}" \
+         -filter_complex "[1:v]${TW_BOXES%,},gblur=sigma=1.1,format=gbrp[tw];[0:v]format=gbrp[bs];[bs][tw]blend=all_mode=screen,format=yuv420p[out]" \
+         -map "[out]" -t "$TW_DUR" -r "$TW_FPS" \
+         -c:v libx264 -preset veryfast -crf 23 -an "stage_tw_$i.mp4" 2>"err_twinkle_$i.log"; then
+      mv "stage_tw_$i.mp4" "stage_clip_$i.mp4"
+      echo "  クリップ$((i+1)): 星の瞬きを描きました(上${TW_TOP}px の範囲 / 周期の基準 ${TW_PERIOD}秒)"
+    else
+      echo "  クリップ$((i+1)): 星の瞬きを描けなかったため、そのまま使います"
+      tail -5 "err_twinkle_$i.log" 2>/dev/null || true
+    fi
+  done
+fi
+
+# ---- ①-3 クリップをシームレスループに加工する ----
+
 
 # 導入部とループの境目を溶かす秒数
 #
