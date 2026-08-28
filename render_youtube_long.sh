@@ -572,6 +572,12 @@ apply_drift_fix_() {
 
   if ffmpeg -y -i "$IN" -vf "$CHAIN" \
        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r "$CFPS" -an "$OUT" 2>"err_driftfix.log"; then
+    # 【切り出した枠を記録する】
+    # 導入部にも、ループの1コマ目とまったく同じ枠を適用するために使う。
+    # 補正は動く方向に応じて枠の開始位置をずらす(左へ流れるなら右端から始める)ので、
+    # 導入部を中央から切り出すと、両者の位置が数十pxずれる。
+    # 溶かしている間そのずれた2枚が重なり、切り替わりが不自然に見えていた。
+    echo "${CW} ${CH} ${SX} ${SY} ${CWID} ${CHGT} ${ZSTART:-1}" > "${OUT}.geom"
     echo "$PCT"
     return 0
   fi
@@ -631,6 +637,7 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
       MARK=""
       if awk -v a="$CMAG" -v b="$BEST_MAG" 'BEGIN{exit !(a < b)}'; then
         cp "cand_drift_$i.mp4" "drift_best_$i.mp4"
+        [ -f "cand_drift_$i.mp4.geom" ] && cp "cand_drift_$i.mp4.geom" "drift_best_$i.geom"
         BEST_MAG="$CMAG"
         BEST_PCT="$PCT"
         BEST_LABEL="$K"
@@ -643,6 +650,7 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
 
     if [ -f "drift_best_$i.mp4" ]; then
       mv "drift_best_$i.mp4" "stage_clip_raw_$i.mp4"
+      [ -f "drift_best_$i.geom" ] && mv "drift_best_$i.geom" "drift_geom_$i.txt"
       DRIFT_ZOOM_PCT="$BEST_PCT"
       echo "  クリップ$((i+1)): 強さ${BEST_LABEL}倍を採用しました(ずれの大きさ ${MAG0} → ${BEST_MAG} / 拡大${BEST_PCT}%)"
     else
@@ -1046,17 +1054,31 @@ else
   GOP_OPTS=""
 fi
 
-# 導入部にかける拡大の指定を組み立てる
+# 導入部にかける切り出しの指定を組み立てる
 #
-# ドリフト補正でループ側が拡大されるため、導入部にも同じ倍率をかけて
-# 切り替わる瞬間に画の大きさが変わらないようにする。
-# 拡大率はクリップごとに実測したドリフト量から決まるので、
-# 補正時に記録した DRIFT_ZOOM_PCT を使う(補正しなかった場合は拡大なし)。
-if [ -n "${DRIFT_ZOOM_PCT:-}" ] && awk -v p="${DRIFT_ZOOM_PCT:-0}" 'BEGIN{exit !(p > 0.05)}'; then
+# 【中央から切り出してはいけない】
+# ドリフト補正は、動く方向に応じて枠の開始位置をずらす。
+# 左へ流れるクリップなら右端から始めて、時間とともに左へ動かす。
+# つまりループの1コマ目は「中央ではない位置」から切り出されている。
+#
+# 導入部を中央から切り出すと、ループの1コマ目との間に数十pxのずれが生じる。
+# 溶かしている間そのずれた2枚が重なるため、切り替わりが不自然に見えていた。
+# 補正のときに記録した枠を、そのまま導入部にも使う。
+INTRO_ZOOM_VF=""
+if [ -f "drift_geom_0.txt" ]; then
+  read GW GH GX GY GFW GFH GZ < drift_geom_0.txt
+  INTRO_ZOOM_VF="crop=${GW}:${GH}:${GX}:${GY},"
+  # 補正の1コマ目に拡大がかかっている場合(カメラが寄っていくクリップ)は、それも合わせる
+  if awk -v z="${GZ:-1}" 'BEGIN{exit !(z > 1.001)}'; then
+    INTRO_ZOOM_VF="${INTRO_ZOOM_VF}crop=iw/${GZ}:ih/${GZ},"
+  fi
+  INTRO_ZOOM_VF="${INTRO_ZOOM_VF}scale=${GFW}:${GFH},"
+  echo "導入部をループの1コマ目と同じ枠で切り出します(${GW}x${GH} を (${GX},${GY}) から)"
+elif [ -n "${DRIFT_ZOOM_PCT:-}" ] && awk -v p="${DRIFT_ZOOM_PCT:-0}" 'BEGIN{exit !(p > 0.05)}'; then
+  # 枠の記録がない場合の保険(中央から切り出す)
   INTRO_ZOOM_VF="crop=iw/(1+${DRIFT_ZOOM_PCT}/100):ih/(1+${DRIFT_ZOOM_PCT}/100),scale=1920:1080,"
-  echo "導入部にもループと同じ${DRIFT_ZOOM_PCT}%の拡大をかけます(切り替わりで画の大きさを揃えるため)"
+  echo "導入部にもループと同じ${DRIFT_ZOOM_PCT}%の拡大をかけます(中央から)"
 else
-  INTRO_ZOOM_VF=""
   echo "ドリフト補正による拡大がないため、導入部はそのまま使います"
 fi
 
