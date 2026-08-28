@@ -522,7 +522,7 @@ apply_drift_fix_() {
     ZSTART=$(awk -v z="$FDZ" 'BEGIN{printf "%.6f", (z>1)?z:1}')
     ZEND=$(awk -v z="$FDZ" 'BEGIN{s=(z>1)?z:1; printf "%.6f", s/z}')
     ZMAX=$(awk -v a="$ZSTART" -v b="$ZEND" 'BEGIN{printf "%.6f", (a>b)?a:b}')
-    ZOOM_VF="zoompan=z='${ZSTART}+(${ZEND}-${ZSTART})*in/${FRAMES}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${CWID}x${CHGT}:fps=${CFPS},"
+    ZOOM_VF="zoompan=z='${ZSTART}+(${ZEND}-${ZSTART})*in/${FRAMES}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${CWID}x${CHGT}:fps=${CFPS}"
   fi
 
   # 平行移動ぶんに加えて、ズーム補正で内側に寄るぶんの余白も確保する
@@ -540,12 +540,31 @@ apply_drift_fix_() {
 
   PCT=$(awk -v w="$CWID" -v cw="$CW" 'BEGIN{printf "%.1f", (w/cw-1)*100}')
 
-  # 【二段階で打ち消す】
-  #   1. zoompan でズームを打ち消す
-  #   2. crop で平行移動を打ち消す
-  # 一度に書くとffmpegが受け付けないため、フィルタを順に並べる。
-  if ffmpeg -y -i "$IN" \
-       -vf "${ZOOM_VF}crop=${CW}:${CH}:x='clip(${SX}+(${FDX})*t/${CD},0,${XMAX})':y='clip(${SY}+(${FDY})*t/${CD},0,${YMAX})',scale=${CWID}:${CHGT}" \
+  # 【いったん拡大してから補正する理由】
+  #
+  # crop も zoompan も、切り出す位置と大きさを整数の画素に丸める。
+  # 6秒かけて3%ズームさせると、丸めのせいで画面全体が1px単位で階段状に飛ぶ。
+  # 動かないコマと大きく飛ぶコマが交互に来るため、これが「かくかく」になる。
+  #
+  # 実測(静止画に3%ズームをかけ、コマ間の変化のばらつきを測ったもの):
+  #   素材そのもの      0.026
+  #   そのまま補正      0.217  ← 8倍に悪化。これがカクつきの正体だった
+  #   6倍にしてから補正 0.058
+  #
+  # 先に6倍へ引き伸ばしておけば、丸めの単位が元の1/6画素になり、
+  # 段差が知覚できない大きさまで下がる。最後に元の大きさへ戻す。
+  # 6倍でも中間の絵は一時的なもので、メモリは0.3GB程度、6秒のクリップで14秒ほど。
+  local SS=${DRIFT_SUPERSAMPLE:-6}
+  local CHAIN="scale=iw*${SS}:ih*${SS}:flags=neighbor,"
+  CHAIN="${CHAIN}crop=$((CW*SS)):$((CH*SS)):x='clip((${SX}+(${FDX})*t/${CD})*${SS},0,${XMAX}*${SS})':y='clip((${SY}+(${FDY})*t/${CD})*${SS},0,${YMAX}*${SS})'"
+  if [ -n "$ZOOM_VF" ]; then
+    # zoompanが拡大の打ち消しと、元の大きさへの縮小をまとめて行う
+    CHAIN="${CHAIN},${ZOOM_VF}"
+  else
+    CHAIN="${CHAIN},scale=${CWID}:${CHGT}"
+  fi
+
+  if ffmpeg -y -i "$IN" -vf "$CHAIN" \
        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r "$CFPS" -an "$OUT" 2>"err_driftfix.log"; then
     echo "$PCT"
     return 0
