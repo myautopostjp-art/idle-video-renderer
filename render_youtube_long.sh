@@ -30,6 +30,22 @@ echo "ループ段階クリップ数: ${#STAGE_CLIP_URLS[@]}"
 echo "効果音: ${AMBIENT_SOUND_URL:-なし}"
 echo "particleKey: ${PARTICLE_KEY:-未指定}"
 
+# ---- 中間ファイルの画質 ----
+#
+# 【なぜ分けるか】
+# ループ部分は、導入部と違って何度も作り直される。
+#   ドリフト補正 → スロー化 → 空を止める → 星を描く → 継ぎ目を溶かす
+# それぞれが非可逆圧縮なので、同じCRFで通すと世代劣化が積み重なり、
+# 導入部より明らかに眠い画になる(実際にそう見えた)。
+#
+# 途中のファイルは一時的なもので容量を気にする必要がないため、
+# ほぼ劣化しない設定で通し、圧縮は最後の1回だけに任せる。
+#
+#   14 … ほぼ原画のまま。数十秒のクリップなので容量も時間も問題にならない
+#   23 … 完成品の設定。ここを途中段階にも使うと劣化が重なる
+CLIP_CRF=14
+CLIP_PRESET=medium
+
 # ---- ①素材のダウンロード ----
 #
 # 【修正】curlに -f を付けた。
@@ -167,11 +183,6 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   echo -n "  ループクリップ$((i+1)): "
   ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "stage_clip_raw_$i.mp4" || true
 done
-
-# vidstabはもう使っていない(ドリフトは実測して線形に打ち消す方式に変更)。
-# 変数だけ残してあるのは、他の箇所から参照されていないことを確認済みのため。
-STABILIZE_ZOOM=0
-HAS_VIDSTAB=false
 
 # ============================================================
 # ループクリップのドリフトを「測って打ち消す」
@@ -570,7 +581,7 @@ apply_drift_fix_() {
   fi
 
   if ffmpeg -y -i "$IN" -vf "$CHAIN" \
-       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r "$CFPS" -an "$OUT" 2>"err_driftfix.log"; then
+       -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r "$CFPS" -an "$OUT" 2>"err_driftfix.log"; then
     # 【切り出した枠を記録する】
     # 導入部にも、ループの1コマ目とまったく同じ枠を適用するために使う。
     # 補正は動く方向に応じて枠の開始位置をずらす(左へ流れるなら右端から始める)ので、
@@ -675,13 +686,13 @@ for ((i=0; i<CLIP_COUNT; i++)); do
 
   if ffmpeg -y -i "stage_clip_raw_$i.mp4" \
        -vf "$SLOW_VF" -an \
-       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed_$i.log"; then
+       -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed_$i.log"; then
     RAW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_raw_$i.mp4")
     NEW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
     echo "  クリップ$((i+1)): ${RAW_DUR}秒 → ${NEW_DUR}秒"
   elif [ "$LOOP_SLOWDOWN_MODE" != "dup" ] && ffmpeg -y -i "stage_clip_raw_$i.mp4" \
        -vf "setpts=PTS/${LOOP_SPEED},fps=30" -an \
-       -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed2_$i.log"; then
+       -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed2_$i.log"; then
     echo "  クリップ$((i+1)): 中間フレームの生成に失敗したため、複製で埋める方式で作りました"
     tail -3 "err_speed_$i.log" || true
   else
@@ -831,7 +842,7 @@ if [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]; then
     if ffmpeg -v error -y -i "stage_clip_$i.mp4" -loop 1 -i "sky_still_$i.png" -loop 1 -i "sky_mask_$i.png" \
          -filter_complex "[1:v]format=rgba[st];[2:v]format=gray[m];[st][m]alphamerge[sa];[0:v]format=rgba[bs];[bs][sa]overlay=format=rgb,format=yuv420p[out]" \
          -map "[out]" -t "$SKY_DUR" -r "$SKY_FPS" \
-         -c:v libx264 -preset veryfast -crf 23 -an "stage_sky_$i.mp4" 2>>"err_sky_$i.log"; then
+         -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -an "stage_sky_$i.mp4" 2>>"err_sky_$i.log"; then
       mv "stage_sky_$i.mp4" "stage_clip_$i.mp4"
       echo "  クリップ$((i+1)): 空を止めました(上${SY1}px を固定、続く${SFE}px でぼかし)"
     else
@@ -901,7 +912,7 @@ if [ "${SKY_TWINKLE_ENABLED:-0}" = "1" ] && [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]
          -f lavfi -i "color=c=black:s=${TW_W}x${TW_H}:d=${TW_DUR}:r=${TW_FPS}" \
          -filter_complex "[1:v]${TW_BOXES%,},gblur=sigma=1.1,format=gbrp[tw];[0:v]format=gbrp[bs];[bs][tw]blend=all_mode=screen,format=yuv420p[out]" \
          -map "[out]" -t "$TW_DUR" -r "$TW_FPS" \
-         -c:v libx264 -preset veryfast -crf 23 -an "stage_tw_$i.mp4" 2>"err_twinkle_$i.log"; then
+         -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -an "stage_tw_$i.mp4" 2>"err_twinkle_$i.log"; then
       mv "stage_tw_$i.mp4" "stage_clip_$i.mp4"
       echo "  クリップ$((i+1)): 星の瞬きを描きました(上${TW_TOP}px の範囲 / 周期の基準 ${TW_PERIOD}秒)"
     else
@@ -983,7 +994,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
 [0:v]trim=start=0:end=${XFADE_LOOP},setpts=PTS-STARTPTS[head];\
 [tail][head]xfade=transition=fade:duration=${XFADE_LOOP}:offset=0[wrap];\
 [main][wrap]concat=n=2:v=1[out]" \
-      -map "[out]" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "stage_loop_$i.mp4" 2>"err_loop_$i.log"; then
+      -map "[out]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r 30 -an "stage_loop_$i.mp4" 2>"err_loop_$i.log"; then
     LOOP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_loop_$i.mp4")
     SEAM_AFTER=$(seam_score_ "stage_loop_$i.mp4")
     echo "  クリップ$((i+1)): ${XFADE_LOOP}秒かけて溶かしました(${CLIP_DUR}秒 → ${LOOP_DUR}秒)"
@@ -998,7 +1009,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     #   [導入部 …元の0秒][元の0〜3秒][加工済みループ(3秒地点から)]…
     # こうすれば全ての繋ぎ目が連続する。
     ffmpeg -y -i "stage_clip_$i.mp4" -t "$XFADE_LOOP" \
-      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -r 30 -an "loop_head_$i.mp4" 2>"err_head_$i.log"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r 30 -an "loop_head_$i.mp4" 2>"err_head_$i.log"
 
     mv "stage_loop_$i.mp4" "stage_clip_$i.mp4"
   else
@@ -1124,12 +1135,18 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     # 導入部の末尾とループの先頭を重ねて溶かすと、
     # 移り変わっている最中はテンポの比較ができなくなり、違和感が消える。
     BODY_LEN=$(awk "BEGIN{print $STAGE_DURATION - $XFADE_LOOP}")
-    ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$BODY_LEN" \
+
+    # 【1周期だけ作って、コピーで繰り返す】
+    # 以前は必要な長さ(1時間版なら約3580秒)をまるごと再エンコードしていた。
+    # 中身は同じ数秒の繰り返しなので、1周期だけ本番の設定で作り、
+    # それを再エンコードなしで並べれば結果は同じで、数十分の処理が数秒になる。
+    ffmpeg -y -i "stage_clip_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_body_$i.mp4"
+      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_unit_$i.mp4"
+    ffmpeg -y -stream_loop -1 -i "stage_unit_$i.mp4" -t "$BODY_LEN" -c copy "stage_body_$i.mp4"
     ffmpeg -y -i "loop_head_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4"
 
     # 導入部の末尾を切り出して、ループの先頭と溶かし合わせる
     INTRO_REAL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video.mp4)
@@ -1140,11 +1157,11 @@ for ((i=0; i<CLIP_COUNT; i++)); do
 
     # ループ先頭部分を「境目で溶かす分」と「そのまま流す分」に分ける
     ffmpeg -y -i "stage_headpart_$i.mp4" -t "$XFADE_INTRO" \
-      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_blend_$i.mp4"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_blend_$i.mp4"
     HAS_HEAD_REST=false
     if awk "BEGIN{exit !($HEAD_REST > 0.05)}"; then
       ffmpeg -y -ss "$XFADE_INTRO" -i "stage_headpart_$i.mp4" \
-        -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_rest_$i.mp4" \
+        -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_rest_$i.mp4" \
         && HAS_HEAD_REST=true
     fi
 
@@ -1166,10 +1183,10 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       :
     elif ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
          -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
-         -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p "intro_tail.mp4" 2>"err_introtail.log" \
+         -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p "intro_tail.mp4" 2>"err_introtail.log" \
        && ffmpeg -y -i "intro_tail.mp4" -i "head_blend_$i.mp4" \
          -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XFADE_INTRO}:offset=0[v]" \
-         -map "[v]" -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "boundary.mp4" 2>"err_boundary.log"; then
+         -map "[v]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "boundary.mp4" 2>"err_boundary.log"; then
       if [ "$HAS_HEAD_REST" = true ]; then
         printf "file 'boundary.mp4'\nfile 'head_rest_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
       else
@@ -1186,9 +1203,11 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4"
     fi
   else
-    ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
+    # ここも同じ考え方: 1周期だけ作り、コピーで必要な長さまで並べる
+    ffmpeg -y -i "stage_clip_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_$i.mp4"
+      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_unit_$i.mp4"
+    ffmpeg -y -stream_loop -1 -i "stage_unit_$i.mp4" -t "$STAGE_DURATION" -c copy "stage_$i.mp4"
   fi
 
   # 境目に使う部分を切り出す
@@ -1197,11 +1216,11 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   if [ "$(awk "BEGIN{print ($AFTER > 0)}")" = "1" ]; then
     TAIL_START=$(awk "BEGIN{print $STAGE_DURATION - $AFTER}")
     ffmpeg -y -ss "$TAIL_START" -i "stage_$i.mp4" -t "$AFTER" \
-      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "tail_$i.mp4"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "tail_$i.mp4"
   fi
   if [ "$(awk "BEGIN{print ($BEFORE > 0)}")" = "1" ]; then
     ffmpeg -y -i "stage_$i.mp4" -t "$BEFORE" \
-      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_$i.mp4"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_$i.mp4"
   fi
 
   # 本体部分(境目に供出した分を除いた中間部分)を切り出す
@@ -1224,268 +1243,13 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     echo "  段階$((i+1))→$((i+2)): ${XF}秒のクロスフェード"
     ffmpeg -y -i "tail_$i.mp4" -i "head_$((i+1)).mp4" \
       -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XF}:offset=0[v]" \
-      -map "[v]" -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "xfade_$i.mp4"
+      -map "[v]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "xfade_$i.mp4"
     echo "file 'xfade_$i.mp4'" >> concat_loop.txt
   fi
 done
 
 # 本体とクロスフェードを順に連結する(再エンコードなし = 高速)
 ffmpeg -y -f concat -safe 0 -i concat_loop.txt -c copy loop_video.mp4
-
-# ---- 静止画ベースのループを作る(手描きのループ動画と同じ発想) ----
-#
-# 【無効にしている理由】
-# 静止画にPexelsの流水・湯気素材を重ねてループを作る方式を試したが、
-# 実写素材とAI画像の質感が合わず、貼り付けたように見えて使えなかった。
-#
-# 雨や雪が馴染むのは「画面全体に散らばる小さな粒」だからで、
-# 滝のように特定の場所に特定の形で存在するものは、
-# 角度・水量・光の当たり方まで一致しないと不自然になる。
-#
-# コードは残してあるので、1 に戻せば再び試せる。
-STILL_LOOP_ENABLED=0
-
-STILL_LOOP_APPLIED=false
-if [ "${STILL_LOOP_ENABLED:-0}" = "1" ] && [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
-  echo "静止画ベースのループを作ります(背景は完全静止)..."
-  STILL_OK=true
-
-  download_or_die_ "$BASE_IMAGE_URL" still_base.bin || STILL_OK=false
-  if [ "$STILL_OK" = true ]; then
-    ffmpeg -y -i still_base.bin \
-      -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1" \
-      -frames:v 1 still_base.png 2>err_stillbase.log || STILL_OK=false
-  fi
-
-  # 1周期の長さ。素材の長さに合わせると継ぎ目が出ないので、素材優先で決める
-  STILL_UNIT=12
-
-  # ---- 重ねるレイヤーを組み立てる ----
-  STILL_INPUTS=()
-  STILL_FILTER=""
-  STILL_LAST="bg"
-  OVERLAY_IDX=1   # 0番は静止画
-
-  add_overlay_() {
-    # $1=素材URL $2=領域キー $3=ぼかし量 $4=不透明度
-    local URL="$1" KEY="$2" BLUR="$3" OPA="$4"
-    [ -z "$URL" ] || [ "$URL" = "none" ] && return 1
-
-    local RECT
-    RECT=$(echo "$LAYER_REGIONS" | jq -r --arg k "$KEY" '.[$k] // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
-    [ -z "$RECT" ] && return 1
-
-    local RX RY RW RH PX PY PW PH
-    read RX RY RW RH <<< "$RECT"
-    PX=$(awk "BEGIN{v=1920*$RX/100; if(v<0)v=0; printf \"%d\", v}")
-    PY=$(awk "BEGIN{v=1080*$RY/100; if(v<0)v=0; printf \"%d\", v}")
-    PW=$(awk "BEGIN{v=1920*$RW/100; if(v<8)v=8; printf \"%d\", v}")
-    PH=$(awk "BEGIN{v=1080*$RH/100; if(v<8)v=8; printf \"%d\", v}")
-
-    if ! download_or_die_ "$URL" "ov_${KEY}.mp4"; then return 1; fi
-
-    STILL_INPUTS+=(-stream_loop -1 -i "ov_${KEY}.mp4")
-    # 素材を領域の大きさに合わせ、黒いキャンバスの該当位置に置いてから
-    # screenブレンドで重ねる(黒は素通りするので、明るい水や湯気だけが乗る)
-    STILL_FILTER="${STILL_FILTER}[${OVERLAY_IDX}:v]scale=${PW}:${PH},format=gbrp[ovs${OVERLAY_IDX}];"
-    STILL_FILTER="${STILL_FILTER}color=c=black:s=1920x1080:d=${STILL_UNIT}:r=30,format=gbrp[cv${OVERLAY_IDX}];"
-    STILL_FILTER="${STILL_FILTER}[cv${OVERLAY_IDX}][ovs${OVERLAY_IDX}]overlay=x=${PX}:y=${PY}[ovp${OVERLAY_IDX}];"
-    STILL_FILTER="${STILL_FILTER}[ovp${OVERLAY_IDX}]gblur=sigma=${BLUR}[ovb${OVERLAY_IDX}];"
-    STILL_FILTER="${STILL_FILTER}[${STILL_LAST}][ovb${OVERLAY_IDX}]blend=all_mode=screen:all_opacity=${OPA}[bl${OVERLAY_IDX}];"
-    STILL_LAST="bl${OVERLAY_IDX}"
-    echo "  ${KEY} を重ねます (x=${PX} y=${PY} w=${PW} h=${PH})"
-    OVERLAY_IDX=$((OVERLAY_IDX + 1))
-    return 0
-  }
-
-  if [ "$STILL_OK" = true ]; then
-    STILL_FILTER="[0:v]format=gbrp[bg];"
-    add_overlay_ "${WATER_FALL_URL:-}" "water_fall" 3 0.85 || true
-    add_overlay_ "${STEAM_URL:-}" "water_surface" 12 0.35 || true
-
-    if [ "$STILL_LAST" = "bg" ]; then
-      echo "  重ねる素材がないため、静止画ベースのループは作りません"
-      STILL_OK=false
-    fi
-  fi
-
-  # ---- 星の明滅 ----
-  if [ "$STILL_OK" = true ]; then
-    SKY=$(echo "$LAYER_REGIONS" | jq -r '.sky // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
-    if [ -n "$SKY" ]; then
-      read SX SY SW SH <<< "$SKY"
-      STAR_B=""
-      for ((s=1; s<=28; s++)); do
-        eval "$(awk -v i=$s -v sx=$SX -v sy=$SY -v sw=$SW -v sh=$SH -v P=$STILL_UNIT 'BEGIN{
-          srand(i*7919);
-          x=int(1920*(sx+rand()*sw)/100);
-          y=int(1080*(sy+rand()*sh*0.85)/100);
-          n=int(2+rand()*5); p=P/n; ph=rand()*6.28; th=0.35+rand()*0.35;
-          printf "STX=%d; STY=%d; STP=%.4f; STPH=%.2f; STTH=%.2f", x, y, p, ph, th
-        }')"
-        STAR_B="${STAR_B}drawbox=x=${STX}:y=${STY}:w=2:h=2:color=white:t=fill:enable='gt(sin(2*PI*t/${STP}+${STPH}),${STTH})',"
-      done
-      STILL_FILTER="${STILL_FILTER}color=c=black:s=1920x1080:d=${STILL_UNIT}:r=30[stb];"
-      STILL_FILTER="${STILL_FILTER}[stb]${STAR_B%,},gblur=sigma=1.1,format=gbrp[stars];"
-      STILL_FILTER="${STILL_FILTER}[${STILL_LAST}][stars]blend=all_mode=screen[withstars];"
-      STILL_LAST="withstars"
-      echo "  星の明滅を28個配置しました"
-    fi
-    STILL_FILTER="${STILL_FILTER}[${STILL_LAST}]format=yuv420p[stillout]"
-  fi
-
-  # ---- 1周期を作って、必要な長さまで繰り返す ----
-  if [ "$STILL_OK" = true ]; then
-    if ffmpeg -y -loop 1 -i still_base.png "${STILL_INPUTS[@]}" \
-         -filter_complex "$STILL_FILTER" -map "[stillout]" \
-         -t "$STILL_UNIT" -r 30 \
-         -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -an still_unit.mp4 2>err_still.log; then
-
-      LOOP_TARGET=$(ffprobe -v error -show_entries format=duration -of csv=p=0 loop_video.mp4)
-      if ffmpeg -y -stream_loop -1 -i still_unit.mp4 -t "$LOOP_TARGET" -c copy still_loop.mp4 2>err_stillloop.log; then
-        mv still_loop.mp4 loop_video.mp4
-        STILL_LOOP_APPLIED=true
-        echo "  静止画ベースのループを作りました(背景は完全静止・継ぎ目なし)"
-      else
-        echo "  繰り返しに失敗したため、従来のループを使います"
-        tail -5 err_stillloop.log || true
-      fi
-    else
-      echo "  静止画ベースのループ作成に失敗したため、従来のループを使います"
-      tail -5 err_still.log || true
-    fi
-  fi
-fi
-
-# ---- レイヤー合成の有効/無効 ----
-#
-# 【無効にしている理由】
-# 「建物と空は静止画、湯だけ動画」という切り分けを試したが、
-# 静止画とLTX動画は元々別物なので、マスクの境目で
-# 「動かない建物」と「動く建物」が混ざり、かえって歪みが悪化した。
-# マスクのぼかし幅(50px)が広いぶん、その帯全体がぐにゃつく。
-#
-# Lo-fi動画が成立するのは最初からレイヤーごとに描かれているからで、
-# 完成した映像を後から切り分けるのとは根本的に違った。
-#
-# コードは残してあるので、1 に戻せば再び試せる。
-LAYER_COMPOSITE_ENABLED=0
-
-LAYER_APPLIED=false
-if [ "$LAYER_COMPOSITE_ENABLED" != "1" ]; then
-  if [ -n "${LAYER_REGIONS:-}" ]; then
-    echo "レイヤー合成は無効に設定されているため、従来方式でレンダリングします"
-  fi
-elif [ -n "${LAYER_REGIONS:-}" ] && [ -n "${BASE_IMAGE_URL:-}" ] && command -v jq >/dev/null 2>&1; then
-  echo "レイヤー合成を行います(建物と空を静止画に固定)..."
-  LAYER_OK=true
-
-  # ベースの静止画
-  download_or_die_ "$BASE_IMAGE_URL" base_image.bin || LAYER_OK=false
-  if [ "$LAYER_OK" = true ]; then
-    ffmpeg -y -i base_image.bin \
-      -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1" \
-      -frames:v 1 base_image.png 2>err_base.log || LAYER_OK=false
-  fi
-
-  # 湯の領域からマスクを作る(白=クリップを見せる場所)
-  if [ "$LAYER_OK" = true ]; then
-    MASK_BOXES=""
-    for KEY in water_fall water_surface; do
-      RECT=$(echo "$LAYER_REGIONS" | jq -r --arg k "$KEY" '.[$k] // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
-      if [ -n "$RECT" ]; then
-        read RX RY RW RH <<< "$RECT"
-        # パーセント座標(0-100)をピクセルへ。少し余白を持たせて自然に馴染ませる
-        PX=$(awk "BEGIN{v=1920*($RX-2)/100; if(v<0)v=0; printf \"%d\", v}")
-        PY=$(awk "BEGIN{v=1080*($RY-2)/100; if(v<0)v=0; printf \"%d\", v}")
-        PW=$(awk "BEGIN{v=1920*($RW+4)/100; printf \"%d\", v}")
-        PH=$(awk "BEGIN{v=1080*($RH+4)/100; printf \"%d\", v}")
-        MASK_BOXES="${MASK_BOXES}drawbox=x=${PX}:y=${PY}:w=${PW}:h=${PH}:color=white:t=fill,"
-        echo "  湯の領域(${KEY}): x=${PX} y=${PY} w=${PW} h=${PH}"
-      fi
-    done
-
-    if [ -z "$MASK_BOXES" ]; then
-      echo "  湯の領域が特定されていないため、レイヤー合成を飛ばします"
-      LAYER_OK=false
-    else
-      # 縁を大きくぼかして、静止画とクリップの境目を溶かす
-      ffmpeg -y -f lavfi -i "color=c=black:s=1920x1080" \
-        -vf "${MASK_BOXES}gblur=sigma=50,format=gray" \
-        -frames:v 1 layer_mask.png 2>err_mask.log || LAYER_OK=false
-    fi
-  fi
-
-  # 合成の実行
-  if [ "$LAYER_OK" = true ]; then
-    LOOP_DUR_ALL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 loop_video.mp4)
-
-    # 1周期の長さ = クリップ長 - ループの継ぎ目
-    # 段階が複数ある場合は周期がひとつに定まらないため、全長を合成する
-    if [ "$CLIP_COUNT" -eq 1 ] && [ -n "$SEAMLESS_DUR" ]; then
-      UNIT_DUR=$(awk "BEGIN{v=$SEAMLESS_DUR; if(v<=0 || v>$LOOP_DUR_ALL) v=$LOOP_DUR_ALL; printf \"%.3f\", v}")
-      echo "  1周期(${UNIT_DUR}秒)だけ合成し、残りは繰り返します"
-    else
-      UNIT_DUR="$LOOP_DUR_ALL"
-      echo "  段階が複数あるため全長(${UNIT_DUR}秒)を合成します"
-    fi
-
-    # 星の明滅を組み立てる(空の領域に小さな点を散らし、周期をずらして瞬かせる)
-    STAR_BOXES=""
-    SKY=$(echo "$LAYER_REGIONS" | jq -r '.sky // empty | "\(.x) \(.y) \(.w) \(.h)"' 2>/dev/null)
-    if [ -n "$SKY" ]; then
-      read SX SY SW SH <<< "$SKY"
-      STAR_COUNT=28
-      for ((s=1; s<=STAR_COUNT; s++)); do
-        eval "$(awk -v i=$s -v sx=$SX -v sy=$SY -v sw=$SW -v sh=$SH -v P=$UNIT_DUR 'BEGIN{
-          srand(i*7919);
-          x=int(1920*(sx+rand()*sw)/100);
-          y=int(1080*(sy+rand()*sh*0.85)/100);
-          n=int(2+rand()*5);
-          p=P/n;
-          ph=rand()*6.28;
-          th=0.35+rand()*0.35;
-          printf "STX=%d; STY=%d; STP=%.4f; STPH=%.2f; STTH=%.2f", x, y, p, ph, th
-        }')"
-        STAR_BOXES="${STAR_BOXES}drawbox=x=${STX}:y=${STY}:w=2:h=2:color=white:t=fill:enable='gt(sin(2*PI*t/${STP}+${STPH}),${STTH})',"
-      done
-      echo "  星の明滅: ${STAR_COUNT}個を空の領域に配置"
-    fi
-
-    if [ -n "$STAR_BOXES" ]; then
-      # 【色形式を揃える】
-      # blendは入力の色形式が違うと色差の扱いを誤り、
-      # 灰色がマゼンタになるなど画面全体の色が壊れる(実際に発生した)。
-      # 両方をgbrpに揃えてからblendし、最後にyuv420pへ戻す。
-      STAR_CHAIN=";color=c=black:s=1920x1080:d=${UNIT_DUR}:r=30[sb];[sb]${STAR_BOXES%,},gblur=sigma=1.1,format=gbrp[stars];[merged]format=gbrp[mg];[mg][stars]blend=all_mode=screen,format=yuv420p[outv]"
-    else
-      STAR_CHAIN=";[merged]format=yuv420p[outv]"
-    fi
-
-    # 【maskedmergeではなくalphamerge+overlayを使う】
-    # maskedmergeは3入力の画素形式が揃っていないと正しく動かない
-    # (検証環境で、マスクの外までクリップが見える誤動作を確認した)。
-    # クリップにマスクをアルファとして焼き込み、ベースに重ねる方式なら確実。
-    if ffmpeg -y -i loop_video.mp4 -loop 1 -i base_image.png -loop 1 -i layer_mask.png -filter_complex \
-        "[0:v]format=rgba[clip];[2:v]format=gray[m];[clip][m]alphamerge[ca];[1:v]format=rgba[base];[base][ca]overlay=format=rgb[merged]${STAR_CHAIN}" \
-        -map "[outv]" -t "$UNIT_DUR" -r 30 \
-        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -an unit_layered.mp4 2>err_layer.log; then
-
-      # 合成した1周期を、元の長さになるまでコピーで繰り返す(再エンコードなしなので一瞬)
-      if ffmpeg -y -stream_loop -1 -i unit_layered.mp4 -t "$LOOP_DUR_ALL" -c copy loop_layered.mp4 2>err_layerloop.log; then
-        mv loop_layered.mp4 loop_video.mp4
-        LAYER_APPLIED=true
-        echo "  レイヤー合成が完了しました(建物と空は静止画、湯の領域だけ動画)"
-      else
-        echo "  合成した1周期の繰り返しに失敗したため、従来のループをそのまま使います"
-        tail -5 err_layerloop.log || true
-      fi
-    else
-      echo "  レイヤー合成に失敗したため、従来のループをそのまま使います"
-      tail -5 err_layer.log || true
-    fi
-  fi
-fi
 
 # ---- ループ部分に夜空のゆらぎを足す ----
 #
@@ -1496,9 +1260,19 @@ SHIMMER_STRENGTH=0.015
 # 【レイヤー合成が動いたときは省く】
 # 合成側で星の明滅を描いているので、画面全体のゆらぎまで足すと過剰になる。
 # また1時間ぶんの全長に掛けると処理が重く、タイムアウトの原因にもなる。
-if [ "${LAYER_APPLIED:-false}" = true ] || [ "${STILL_LOOP_APPLIED:-false}" = true ]; then
+if [ "${SKY_TWINKLE_ENABLED:-0}" = "1" ] && [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]; then
+  # 【空に星を描いた場合も省く】
+  #
+  # ゆらぎは、星の瞬きも炎の揺らめきもLTXが表現しなかった頃に、
+  # 画面全体の明るさを揺らして補うために入れたもの。
+  # 空に星の明滅を描くようになった今は役目が重なっている。
+  # しかも建物や湯船まで一緒に明滅するため、かえって不自然に見えかねない。
+  #
+  # 実務上さらに重要なのは処理時間で、この処理はループ部分の全長に
+  # かかる。1時間版では3600秒ぶんの再エンコードが1回まるごと増え、
+  # 画質もその分だけ落ちる。省けるなら省いたほうがよい。
   SHIMMER_STRENGTH=0
-  echo "星の明滅を描いたため、画面全体のゆらぎは省きます"
+  echo "空に星の瞬きを描いたため、画面全体のゆらぎは省きます(全長の再エンコードを1回減らせます)"
 fi
 
 if awk "BEGIN{exit !($SHIMMER_STRENGTH > 0.0001)}"; then
@@ -1523,6 +1297,17 @@ if awk "BEGIN{exit !($SHIMMER_STRENGTH > 0.0001)}"; then
     tail -3 err_shimmer.log || true
     rm -f loop_shimmer.mp4
   fi
+fi
+
+# 実際に繰り返される周期を記録する
+#
+# render.yml の LOOP_PERIOD(Geminiの動画チェックが1周期分を切り出すのに使う値)は
+# 手で書いた固定値なので、LOOP_SPEED を変えるたびにずれていく。
+# 実測値をファイルに残し、ワークフロー側から読めるようにする。
+if [ -n "${SEAMLESS_DUR:-}" ]; then
+  ACTUAL_PERIOD=$(awk -v d="$SEAMLESS_DUR" 'BEGIN{printf "%d", (d<1)?1:d+0.5}')
+  echo "$ACTUAL_PERIOD" > loop_period.txt
+  echo "実際のループ周期: 約${ACTUAL_PERIOD}秒(render.yml の LOOP_PERIOD はこの値を使います)"
 fi
 
 echo "ループ部分の結合が完了しました"
