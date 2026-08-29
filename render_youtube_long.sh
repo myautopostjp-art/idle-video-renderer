@@ -919,20 +919,23 @@ fi
 #
 # ループの継ぎ目(XFADE_LOOP)とは別に設定する。
 #
-# 【2秒から4秒に延ばした理由】
-# 導入部は空が動いているが、ループでは空を止めてある。
-# 切り替わった瞬間に空だけが急に停止するため、そこに違和感が出ていた。
-# 導入部はカメラが動くので、空を止めることはできない。
-# 境目を長く溶かして、停止していく過程をなだらかにする。
-# あわせて、等速から0.6倍への速さの変化もこの間に紛れる。
+# 【4秒にしたら「ぶれ」が出たので2秒に戻した】
+# 導入部の終盤は、カメラがまだ止まりきらずに前進を続けている。
+# さらにLTXは終端の数秒で画が崩れやすい。
+# そこを長く重ねると、動いている画と止まっている画が
+# 長時間二重になり、ぶれて見えてしまう。
 #
-# 【長くしすぎた場合】
-# 導入部の終盤はカメラが止まっているため、二重像が動かないまま
-# 居座って「残像」として見える。6秒では実際にそうなった。
-#   2 … 空の停止が唐突に見えた
-#   4 … なだらかに移る(現在)
-#   6 … 残像が目立つ
-XFADE_INTRO=4
+# 溶かす時間には、相反する2つの要求がある:
+#   長くしたい … 空が急に止まること、速さが変わることを紛らわせたい
+#   短くしたい … 動いているカメラと重なる時間を減らしたい
+# 枠のずれを直した今は、短くしても位置が合うので後者を優先する。
+#
+#   0 … 溶かさずに直結する。二重像は原理的に出ない。
+#        ループの1コマ目は導入部の最終フレームとほぼ同じ絵なので、
+#        切り替わりは空が止まることと速さの変化だけになる
+#   2 … 二重になる時間を最小限にする(現在)
+#   4 … 空の停止はなだらかになるが、ぶれが出た
+XFADE_INTRO=2
 
 # 導入部の冒頭から切り落とす秒数
 #
@@ -1151,9 +1154,23 @@ for ((i=0; i<CLIP_COUNT; i++)); do
         && HAS_HEAD_REST=true
     fi
 
+    # 【溶かさない指定のときは直結する】
+    # xfade は長さ0では動かない。枠を揃えてあるので、
+    # そのまま繋いでも位置は一致する。
+    if awk "BEGIN{exit !($XFADE_INTRO < 0.05)}"; then
+      printf "file 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
+      echo "  段階1: 導入部とループを溶かさずに直結します"
+      ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4"
+      SKIP_BOUNDARY=true
+    else
+      SKIP_BOUNDARY=false
+    fi
+
     # 【重要】導入部にもループと同じ拡大をかける。
     # 補正の拡大がループ側にだけ掛かると、切り替わる瞬間に画が一回り大きくなる。
-    if ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
+    if [ "$SKIP_BOUNDARY" = true ]; then
+      :
+    elif ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
          -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
          -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p "intro_tail.mp4" 2>"err_introtail.log" \
        && ffmpeg -y -i "intro_tail.mp4" -i "head_blend_$i.mp4" \
@@ -1171,7 +1188,9 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       echo "  段階1: 境目の加工に失敗したため、そのまま繋ぎます"
       tail -3 err_introtail.log err_boundary.log 2>/dev/null || true
     fi
-    ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4"
+    if [ "$SKIP_BOUNDARY" != true ]; then
+      ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4"
+    fi
   else
     ffmpeg -y -stream_loop -1 -i "stage_clip_$i.mp4" -t "$STAGE_DURATION" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
