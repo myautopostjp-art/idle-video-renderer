@@ -147,19 +147,10 @@ done
 #   (Geminiの動画チェックが1周期分を切り出すのに使っている)
 # ループクリップの再生速度
 #
-# 【1.0に戻した理由】
-# GAS側でクリップの生成を20秒に変えたため、引き伸ばす必要がなくなった。
-# 等速なら足りないコマを推測で描く処理が一切走らないので、
-# ループ部分の画質が導入部と並ぶ。テンポの差も消える。
-#
-# これまで0.4〜0.8の間を行き来していたのは、6秒のクリップから
-# 周期を稼ごうとしていたためで、無理をしていた。
-#
-#   1.0 … 等速(現在)。20秒のクリップが前提
-#   0.5 … 6秒のクリップ時代の設定。5枚に4枚が生成コマになり、湯がにじんだ
-#
-# ※GAS側を6秒に戻す場合は、この値も下げること
-LOOP_SPEED=1.0
+# 【この版は「6秒クリップ」向けの巻き戻し用です】
+# 20秒クリップ版が気に入らなかったときに、この状態へ戻せます。
+# 使うときは GAS の YOUTUBE_STAGE_CLIP_DURATION_SEC も 6 に戻すこと。
+LOOP_SPEED=0.5
 
 # 遅くしたぶんの隙間を、どうやって埋めるか
 #
@@ -840,9 +831,41 @@ if [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]; then
     fi
 
     # 上が白(静止画を見せる)、下が黒(映像を見せる)のマスクを作る
-    if ! ffmpeg -v error -y -f lavfi -i "color=c=black:s=${SW}x${SH}" \
-         -vf "geq=lum='if(lt(Y,${SY1}),255,if(lt(Y,${SY1}+${SFE}),255*(1-(Y-${SY1})/${SFE}),0))'" \
-         -frames:v 1 "sky_mask_$i.png" 2>>"err_sky_$i.log"; then
+    #
+    # 【ffmpegのgeqで作るのをやめた理由】
+    # geqで作ったマスクは、値が0〜255にならず79〜174に圧縮されていた。
+    # 色空間の変換で、映像用の限られた範囲(16〜235)に丸められていたため。
+    #
+    # 結果として、意図とまるで違う掛かり方をしていた:
+    #   空 …… 68%しか止まらず、うっすら動き続けていた
+    #   湯面 … 止めるつもりのない場所に、1コマ目の静止画が31%重なっていた
+    #
+    # 湯面の光の反射が3割固定されたまま動くので、
+    # 「光の当たり方が不自然」という見え方になっていた。
+    # 雲海が止まりきらなかったのも同じ原因。
+    #
+    # 画像ファイルを直接書き出せば、値は狂いようがない。
+    # PGMは「ヘッダ + 画素の値を並べただけ」の素朴な形式なので、
+    # 標準ライブラリだけで確実に作れる(Pillowは入っていない)。
+    if ! python3 - "$SW" "$SH" "$SY1" "$SFE" > "sky_mask_$i.pgm" <<'MASKPY'
+import sys
+w, h, y1, fe = (int(v) for v in sys.argv[1:5])
+if fe < 1:
+    fe = 1
+rows = []
+for y in range(h):
+    if y < y1:
+        v = 255                                   # 完全に静止画
+    elif y < y1 + fe:
+        v = int(round(255 * (1 - (y - y1) / fe))) # 徐々に映像へ
+    else:
+        v = 0                                     # 完全に映像
+    rows.append(bytes([v]) * w)
+out = sys.stdout.buffer
+out.write(b'P5\n%d %d\n255\n' % (w, h))
+out.write(b''.join(rows))
+MASKPY
+    then
       echo "  クリップ$((i+1)): マスクを作れなかったため、空はそのままにします"
       continue
     fi
@@ -855,7 +878,7 @@ if [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]; then
               | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
     if [ -z "$SKY_FPS" ] || awk -v f="$SKY_FPS" 'BEGIN{exit !(f<1)}'; then SKY_FPS=30; fi
 
-    if ffmpeg -v error -y -i "stage_clip_$i.mp4" -loop 1 -i "sky_still_$i.png" -loop 1 -i "sky_mask_$i.png" \
+    if ffmpeg -v error -y -i "stage_clip_$i.mp4" -loop 1 -i "sky_still_$i.png" -loop 1 -i "sky_mask_$i.pgm" \
          -filter_complex "[1:v]format=rgba[st];[2:v]format=gray[m];[st][m]alphamerge[sa];[0:v]format=rgba[bs];[bs][sa]overlay=format=rgb,format=yuv420p[out]" \
          -map "[out]" -t "$SKY_DUR" -r "$SKY_FPS" \
          -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -an "stage_sky_$i.mp4" 2>>"err_sky_$i.log"; then
