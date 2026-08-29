@@ -43,6 +43,24 @@ echo "particleKey: ${PARTICLE_KEY:-未指定}"
 #
 #   14 … ほぼ原画のまま。数十秒のクリップなので容量も時間も問題にならない
 #   23 … 完成品の設定。ここを途中段階にも使うと劣化が重なる
+# ---- 完成品の画質 ----
+#
+# ここは1時間ぶんの容量に直結するので、中間ファイルとは別に持つ。
+#
+# 【preset を veryfast から slow に変えた理由】
+# presetは「同じ画質をどれだけ小さくできるか」を決める設定で、
+# 遅いほど効率がよくなる。veryfastは名前のとおり速さ優先で、
+# 同じCRFでも余計に容量を使い、そのぶん細部が荒れる。
+#
+# ループ部分は1周期(十数秒)だけ本番設定で作り、あとはコピーで並べる。
+# つまり時間のかかる圧縮を行うのは十数秒ぶんだけなので、
+# 遅いpresetを使っても全体の処理時間はほとんど変わらない。
+#
+# CRFを23から21に上げつつpresetをslowにすると、
+# 容量はほぼ同じまま画質だけが上がる。
+FINAL_CRF=21
+FINAL_PRESET=slow
+
 CLIP_CRF=14
 CLIP_PRESET=medium
 
@@ -129,25 +147,19 @@ done
 #   (Geminiの動画チェックが1周期分を切り出すのに使っている)
 # ループクリップの再生速度
 #
-# 【0.5に下げた理由】
-# 雲を止めた今、この値が変えるのは湯と湯気の速さだけになった。
-# 0.8では水面の動きが速く、落ち着いて見ていられなかった。
+# 【1.0に戻した理由】
+# GAS側でクリップの生成を20秒に変えたため、引き伸ばす必要がなくなった。
+# 等速なら足りないコマを推測で描く処理が一切走らないので、
+# ループ部分の画質が導入部と並ぶ。テンポの差も消える。
 #
-#   1.0 … 導入部と同じテンポ。ただし水面が忙しない
-#   0.8 … テンポ差は小さいが、まだ水面が速い
-#   0.5 … 水面が落ち着く。周期は12.2秒(現在)
-#   0.4 … さらに遅いが、落ちる湯が「垂れている」ように見え始める
+# これまで0.4〜0.8の間を行き来していたのは、6秒のクリップから
+# 周期を稼ごうとしていたためで、無理をしていた。
 #
-# 【引き換えになるもの】
-# 導入部は等速なので、切り替わりでテンポの差が出る。
-# 落ち着いた映像であることのほうが商品として重要なので、そちらを優先する。
-# 切り替わりが気になるなら、LTXで20秒のクリップを作って等速で流すのが本筋。
+#   1.0 … 等速(現在)。20秒のクリップが前提
+#   0.5 … 6秒のクリップ時代の設定。5枚に4枚が生成コマになり、湯がにじんだ
 #
-# ※この値を変えたら render.yml の LOOP_PERIOD も直すこと
-#   (0.5なら周期は約10秒 = 12.2秒 − 重ねる2秒。
-#    ただし render_youtube_long.sh が実測値を loop_period.txt に書き出すので、
-#    ワークフロー側はそちらを優先して使う)
-LOOP_SPEED=0.5
+# ※GAS側を6秒に戻す場合は、この値も下げること
+LOOP_SPEED=1.0
 
 # 遅くしたぶんの隙間を、どうやって埋めるか
 #
@@ -1146,7 +1158,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     # それを再エンコードなしで並べれば結果は同じで、数十分の処理が数秒になる。
     ffmpeg -y -i "stage_clip_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_unit_$i.mp4"
+      -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_unit_$i.mp4"
     ffmpeg -y -stream_loop -1 -i "stage_unit_$i.mp4" -t "$BODY_LEN" -c copy "stage_body_$i.mp4"
     ffmpeg -y -i "loop_head_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
@@ -1210,7 +1222,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     # ここも同じ考え方: 1周期だけ作り、コピーで必要な長さまで並べる
     ffmpeg -y -i "stage_clip_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_unit_$i.mp4"
+      -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_unit_$i.mp4"
     ffmpeg -y -stream_loop -1 -i "stage_unit_$i.mp4" -t "$STAGE_DURATION" -c copy "stage_$i.mp4"
   fi
 
@@ -1353,7 +1365,7 @@ if [ -n "${INTRO_TRIM:-}" ]; then
 fi
 ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
   -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
-  -c:v libx264 -preset veryfast -crf 23 $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
+  -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
