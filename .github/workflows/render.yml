@@ -63,15 +63,15 @@ jobs:
               echo "ambient_sound_url=${{ github.event.client_payload.ambient_sound_url || 'none' }}" >> $GITHUB_OUTPUT
               echo "particle_key=${{ github.event.client_payload.particle_key || '' }}" >> $GITHUB_OUTPUT
               echo "transitions=${{ github.event.client_payload.transitions || '' }}" >> $GITHUB_OUTPUT
-              # レイヤー合成の情報(ベース静止画URL + 湯・空の領域)。
+              # 効果音を立ち上げる位置(Geminiが導入部を見て判断した値)。
               # GitHubのclient_payloadは10項目までなので1つのJSON文字列にまとめてある。
               #
               # 【ヒアドキュメントを使わない理由】
               # YAMLのブロック内では終端行にもインデントが付いてしまい、
               # bashが終端と認識できず syntax error になる(実際に失敗した)。
               # jqでJSONとして書き出せば、引用符の扱いも安全になる。
-              jq -n --argjson v '${{ toJson(github.event.client_payload.layer_info) }}' '$v' > layer_info_raw.json || echo '""' > layer_info_raw.json
-              jq -r '. // empty' layer_info_raw.json > layer_info.json || : 
+              jq -n --argjson v '${{ toJson(github.event.client_payload.audio_timing) }}' '$v' > audio_timing_raw.json || echo '""' > audio_timing_raw.json
+              jq -r '. // empty' audio_timing_raw.json > audio_timing.json || : 
             else
               echo "image_url=${{ github.event.client_payload.image_url }}" >> $GITHUB_OUTPUT
             fi
@@ -113,16 +113,18 @@ jobs:
             ./render_bgm_weather.sh "${{ steps.params.outputs.bgm_url }}" output.mp4 top.txt bottom.txt $IMAGE_URLS
           elif [ "${{ steps.params.outputs.mode }}" = "render-video-youtube-long" ]; then
             IMAGE_URLS=$(jq -r '.[]' image_urls.json | tr '\n' ' ')
-            # レイヤー合成用の情報を取り出す(空ならレイヤー合成なしで動く)
-            if [ -s layer_info.json ] && jq -e . layer_info.json >/dev/null 2>&1; then
-              export BASE_IMAGE_URL=$(jq -r '.base // empty' layer_info.json)
-              export LAYER_REGIONS=$(jq -c '.regions // empty' layer_info.json)
-              # 静止画に重ねる素材(湯の落下・湯気)
-              export WATER_FALL_URL=$(jq -r '.materials.water_fall // empty' layer_info.json)
-              export STEAM_URL=$(jq -r '.materials.steam // empty' layer_info.json)
-              echo "レイヤー合成の情報を受け取りました"
+            # 効果音のタイミングを取り出す(空なら既定のタイミングで動く)
+            #
+            # カメラワークは生成のたびに変わるため、湯船が現れる秒数も変わる。
+            # 決め打ちだと「画面で水が流れているのに無音」というずれが起きる。
+            # Geminiが導入部を見て判断した値をここで受け取る。
+            if [ -s audio_timing.json ] && jq -e . audio_timing.json >/dev/null 2>&1; then
+              export AUDIO_OPEN_START=$(jq -r '.openStart // empty' audio_timing.json)
+              export AUDIO_OPEN_DURATION=$(jq -r '.openDuration // empty' audio_timing.json)
+              export AUDIO_FAR_VOLUME=$(jq -r '.farVolume // empty' audio_timing.json)
+              echo "効果音のタイミングを受け取りました: ${AUDIO_OPEN_START}秒から${AUDIO_OPEN_DURATION}秒かけて(それまでの音量 ${AUDIO_FAR_VOLUME})"
             else
-              echo "レイヤー合成の情報がないため、従来方式でレンダリングします"
+              echo "効果音のタイミング指定がないため、既定の位置で立ち上げます"
             fi
             ./render_youtube_long.sh "${{ steps.params.outputs.intro_video_url }}" "${{ steps.params.outputs.bgm_url }}" "${{ steps.params.outputs.duration }}" "${{ steps.params.outputs.intro_duration }}" output.mp4 $IMAGE_URLS
           else
