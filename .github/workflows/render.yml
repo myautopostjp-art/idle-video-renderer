@@ -383,7 +383,11 @@ jobs:
           import os, json, base64, urllib.request
 
           api_key = os.environ['GEMINI_API_KEY']
-          url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}'
+          # 【flash-lite ではなく flash を使う】
+          # flash-lite は速くて安いが判断力が低く、目視で見つかる破綻を
+          # 「問題なし」と報告した。時間をまたいで比べる判断には力不足。
+          # flash に上げたところ、同じ動画から3箇所の破綻を言い当てた。
+          url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}'
 
           loop_period = ${LOOP_PERIOD}
 
