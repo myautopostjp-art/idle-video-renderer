@@ -496,7 +496,11 @@ DRIFTPY
 # いちばん小さくなったものを採用する。
 # ループ候補3本から最良を選ぶのと同じ考え方で、
 # 推定の誤差そのものを避けられる。
-DRIFT_STRENGTHS="0.6 0.8 1.0 1.2"
+# 【0.1刻みにした】
+# 0.6 0.8 1.0 1.2 の4段階では粗すぎて、素材に合う強さを飛ばしていた。
+# 実素材で 0.8→28.1 / 1.0→36.6 と大きく跳ねており、
+# 最適値がその間にあるのに拾えていなかった。
+DRIFT_STRENGTHS="0.5 0.6 0.7 0.8 0.9 1.0 1.1 1.2 1.3"
 
 # ズーム補正の上限(%)
 #
@@ -653,18 +657,29 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
     BEST_LABEL=""
     rm -f "drift_best_$i.mp4"
 
-    for K in $DRIFT_STRENGTHS; do
-      KDX=$(awk -v v="$DX" -v k="$K" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
-      KDY=$(awk -v v="$DY" -v k="$K" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
-      KDZ=$(awk -v z="$DZ" -v k="$K" 'BEGIN{printf "%.4f", 1+(z-1)*k}')
+    # 【ズームと平行移動を順に詰める】
+    #
+    # この2つは別々の現象なので、ちょうどよい強さも別々になる。
+    # 同じ強さで両方を動かしていたため、実素材では平行移動が
+    # 11px→10px までしか減らなかった。
+    #
+    # そこで先にズームだけを詰め、次にその状態から平行移動を詰める。
+    # 総当たりだと81通りになって時間がかかりすぎるので、
+    # 順に片方ずつ決める形にしている(9+9=18通り)。
+    try_drift_() {
+      # $1=ズームの強さ $2=平行移動の強さ $3=表示用の見出し
+      local KZ="$1" KP="$2" LABEL="$3"
+      local KDX KDY KDZ PCT CAND CDX CDY CDZ CMAG CZPCT MARK
+      KDX=$(awk -v v="$DX" -v k="$KP" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
+      KDY=$(awk -v v="$DY" -v k="$KP" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
+      KDZ=$(awk -v z="$DZ" -v k="$KZ" 'BEGIN{printf "%.4f", 1+(z-1)*k}')
 
       PCT=$(apply_drift_fix_ "stage_clip_raw_$i.mp4" "cand_drift_$i.mp4" "$KDX" "$KDY" "$KDZ") || {
-        echo "    強さ${K}倍: 作成に失敗しました"
+        echo "    ${LABEL}: 作成に失敗しました"
         tail -3 err_driftfix.log 2>/dev/null || true
-        continue
+        return 1
       }
 
-      # 候補の残りを測る(途中経過は出さず、結果だけ見る)
       CAND=$(measure_drift_ "cand_drift_$i.mp4" 2>/dev/null | tail -1)
       CDX=$(echo "$CAND" | awk '{print ($1=="")?0:$1}')
       CDY=$(echo "$CAND" | awk '{print ($2=="")?0:$2}')
@@ -678,11 +693,32 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
         [ -f "cand_drift_$i.mp4.geom" ] && cp "cand_drift_$i.mp4.geom" "drift_best_$i.geom"
         BEST_MAG="$CMAG"
         BEST_PCT="$PCT"
-        BEST_LABEL="$K"
+        BEST_LABEL="$LABEL"
+        BEST_KZ="$KZ"
+        BEST_KP="$KP"
         MARK=" ←現時点で最良"
       fi
-      echo "    強さ${K}倍(拡大${PCT}%): 残り x=${CDX}px y=${CDY}px ズーム${CZPCT}% → ずれの大きさ ${CMAG}${MARK}"
+      echo "    ${LABEL}(拡大${PCT}%): 残り x=${CDX}px y=${CDY}px ズーム${CZPCT}% → ずれの大きさ ${CMAG}${MARK}"
+      return 0
+    }
+
+    # ---- 1段階目: ズームの強さを決める(平行移動は等倍で固定) ----
+    BEST_KZ=1.0
+    BEST_KP=1.0
+    echo "  1段階目: ズームの強さを探します"
+    for K in $DRIFT_STRENGTHS; do
+      try_drift_ "$K" 1.0 "ズーム${K}倍" || true
     done
+
+    # ---- 2段階目: 平行移動の強さを決める(ズームは1段階目の値で固定) ----
+    if awk -v x="$DX" -v y="$DY" 'BEGIN{ax=(x<0)?-x:x; ay=(y<0)?-y:y; exit !(ax>=2||ay>=2)}'; then
+      echo "  2段階目: 平行移動の強さを探します(ズームは${BEST_KZ}倍で固定)"
+      ZFIX="$BEST_KZ"
+      for K in $DRIFT_STRENGTHS; do
+        [ "$K" = "1.0" ] && continue   # 1段階目で試し済み
+        try_drift_ "$ZFIX" "$K" "移動${K}倍" || true
+      done
+    fi
 
     rm -f "cand_drift_$i.mp4"
 
@@ -690,7 +726,7 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
       mv "drift_best_$i.mp4" "stage_clip_raw_$i.mp4"
       [ -f "drift_best_$i.geom" ] && mv "drift_best_$i.geom" "drift_geom_$i.txt"
       DRIFT_ZOOM_PCT="$BEST_PCT"
-      echo "  クリップ$((i+1)): 強さ${BEST_LABEL}倍を採用しました(ずれの大きさ ${MAG0} → ${BEST_MAG} / 拡大${BEST_PCT}%)"
+      echo "  クリップ$((i+1)): ${BEST_LABEL}を採用しました(ずれの大きさ ${MAG0} → ${BEST_MAG} / 拡大${BEST_PCT}%)"
     else
       echo "  クリップ$((i+1)): どの強さでも改善しなかったため、補正せずそのまま使います"
     fi
