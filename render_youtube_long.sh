@@ -294,8 +294,22 @@ if len(a) < W * H or len(b) < W * H:
     bail('データが足りません (a=%d b=%d 必要=%d)' % (len(a), len(b), W * H))
 
 STEP = 4          # 何画素おきに比べるか(小さいほど正確だが遅い)
-RANGE = 16        # 探す範囲(±px、測定解像度での値)
-COARSE = 2        # 粗探しの刻み
+
+# 探す範囲(±px、測定解像度での値)
+#
+# 【16から48に広げた理由】
+# 16pxまでしか探さないと、検出できるズームは最大3.8%が限界だった。
+# それを超えるドリフトは上限に張り付き、実際より小さい値が返る。
+#
+# 実素材で確かめたところ、真の値は4.41%なのに2.58%と報告されていた。
+# その小さい値で補正するので当然打ち消しきれず、
+# 補正後もまた上限に張り付いて「効いていない」ように見えていた。
+# 20%のズームをかけて測っても1.9%としか出ず、頭打ちが確認できた。
+#
+# 48pxまで探せば11%のズームまで検出できる。
+# 刻みを4に広げたので、範囲を3倍にしても速度はむしろ上がっている。
+RANGE = 48
+COARSE = 4        # 粗探しの刻み
 
 def diff(x0, y0, rw, rh, dx, dy):
     """末尾を(dx,dy)ずらしたときの、先頭との明るさの差の平均"""
@@ -626,6 +640,61 @@ apply_drift_fix_() {
   return 1
 }
 
+# 候補を評価するときの解像度
+#
+# 【なぜ下げるか】
+# 補正の強さを探すために十数本作って測る。
+# これを本番と同じ6倍拡大・1080pで行うと1本45秒、全体で13分かかる。
+#
+# 強さを選ぶだけなら960x540で粗く作っても結論は変わらない
+# (測定そのものが960で行われるため)。
+# 評価は軽く済ませ、決まった強さで最後に一度だけ本番品質で作る。
+DRIFT_EVAL_WIDTH=960
+
+# 候補を評価するための軽い補正(強さを選ぶためだけに使う)
+apply_drift_fix_fast_() {
+  local IN="$1" OUT="$2" FDX="$3" FDY="$4" FDZ="$5"
+  local CD CWID CHGT CFPS ABSX ABSY ZOOM_VF ZMAX ZSTART ZEND FRAMES
+  local ZPAD ZPADY MARGIN CW CH XMAX YMAX SX SY CHAIN
+
+  CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$IN")
+  CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$IN")
+  CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$IN")
+  CFPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$IN" \
+         | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
+  if [ -z "$CFPS" ] || awk -v f="$CFPS" 'BEGIN{exit !(f<1)}'; then CFPS=30; fi
+
+  ABSX=$(awk -v v="$FDX" 'BEGIN{printf "%d", (v<0)?-v:v}')
+  ABSY=$(awk -v v="$FDY" 'BEGIN{printf "%d", (v<0)?-v:v}')
+
+  ZOOM_VF=""
+  ZMAX=1
+  if awk -v z="$FDZ" 'BEGIN{d=(z>1)?z-1:1-z; exit !(d>0.001)}'; then
+    FRAMES=$(awk -v d="$CD" -v f="$CFPS" 'BEGIN{printf "%d", d*f}')
+    ZSTART=$(awk -v z="$FDZ" 'BEGIN{printf "%.6f", (z>1)?z:1}')
+    ZEND=$(awk -v z="$FDZ" 'BEGIN{s=(z>1)?z:1; printf "%.6f", s/z}')
+    ZMAX=$(awk -v a="$ZSTART" -v b="$ZEND" 'BEGIN{printf "%.6f", (a>b)?a:b}')
+    ZOOM_VF="zoompan=z='${ZSTART}+(${ZEND}-${ZSTART})*in/${FRAMES}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${CWID}x${CHGT}:fps=${CFPS}"
+  fi
+
+  ZPAD=$(awk -v zm="$ZMAX" -v w="$CWID" 'BEGIN{printf "%d", w*(zm-1)/2}')
+  ZPADY=$(awk -v zm="$ZMAX" -v h="$CHGT" 'BEGIN{printf "%d", h*(zm-1)/2}')
+  MARGIN=6
+  CW=$(( (CWID - ABSX - ZPAD*2 - MARGIN*2) / 2 * 2 ))
+  CH=$(( (CHGT - ABSY - ZPADY*2 - MARGIN*2) / 2 * 2 ))
+  if [ "$CW" -lt 320 ] || [ "$CH" -lt 180 ]; then return 1; fi
+  XMAX=$(( CWID - CW )); YMAX=$(( CHGT - CH ))
+  if [ "$FDX" -lt 0 ]; then SX=$XMAX; else SX=0; fi
+  if [ "$FDY" -lt 0 ]; then SY=$YMAX; else SY=0; fi
+
+  CHAIN="crop=${CW}:${CH}:x='clip((${SX}+(${FDX})*t/${CD}),0,${XMAX})':y='clip((${SY}+(${FDY})*t/${CD}),0,${YMAX})'"
+  if [ -n "$ZOOM_VF" ]; then CHAIN="${CHAIN},${ZOOM_VF}"; fi
+  CHAIN="${CHAIN},scale=${DRIFT_EVAL_WIDTH}:-2"
+
+  ffmpeg -y -i "$IN" -vf "$CHAIN" \
+    -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p -r "$CFPS" -an "$OUT" 2>/dev/null
+}
+
 DRIFT_ZOOM_PCT=""
 if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
   echo "ループクリップのドリフトを測って打ち消します..."
@@ -674,11 +743,13 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
       KDY=$(awk -v v="$DY" -v k="$KP" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
       KDZ=$(awk -v z="$DZ" -v k="$KZ" 'BEGIN{printf "%.4f", 1+(z-1)*k}')
 
-      PCT=$(apply_drift_fix_ "stage_clip_raw_$i.mp4" "cand_drift_$i.mp4" "$KDX" "$KDY" "$KDZ") || {
+      apply_drift_fix_fast_ "stage_clip_raw_$i.mp4" "cand_drift_$i.mp4" "$KDX" "$KDY" "$KDZ" || {
         echo "    ${LABEL}: 作成に失敗しました"
-        tail -3 err_driftfix.log 2>/dev/null || true
         return 1
       }
+      PCT=$(awk -v w=1920 -v z="$KDZ" -v x="$KDX" 'BEGIN{
+        d=(z>1)?z-1:1-z; ax=(x<0)?-x:x;
+        cw=w-ax-w*d-12; if(cw<1)cw=1; printf "%.1f", (w/cw-1)*100 }')
 
       CAND=$(measure_drift_ "cand_drift_$i.mp4" 2>/dev/null | tail -1)
       CDX=$(echo "$CAND" | awk '{print ($1=="")?0:$1}')
@@ -689,8 +760,6 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
 
       MARK=""
       if awk -v a="$CMAG" -v b="$BEST_MAG" 'BEGIN{exit !(a < b)}'; then
-        cp "cand_drift_$i.mp4" "drift_best_$i.mp4"
-        [ -f "cand_drift_$i.mp4.geom" ] && cp "cand_drift_$i.mp4.geom" "drift_best_$i.geom"
         BEST_MAG="$CMAG"
         BEST_PCT="$PCT"
         BEST_LABEL="$LABEL"
@@ -722,11 +791,23 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
 
     rm -f "cand_drift_$i.mp4"
 
-    if [ -f "drift_best_$i.mp4" ]; then
-      mv "drift_best_$i.mp4" "stage_clip_raw_$i.mp4"
-      [ -f "drift_best_$i.geom" ] && mv "drift_best_$i.geom" "drift_geom_$i.txt"
-      DRIFT_ZOOM_PCT="$BEST_PCT"
-      echo "  クリップ$((i+1)): ${BEST_LABEL}を採用しました(ずれの大きさ ${MAG0} → ${BEST_MAG} / 拡大${BEST_PCT}%)"
+    if [ -n "$BEST_LABEL" ]; then
+      # ---- 決まった強さで、本番品質の補正をかける ----
+      # ここまでは強さを選ぶための粗い試作。最後に一度だけ丁寧に作る。
+      FKDX=$(awk -v v="$DX" -v k="$BEST_KP" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
+      FKDY=$(awk -v v="$DY" -v k="$BEST_KP" 'BEGIN{printf "%d", (v*k<0)? int(v*k-0.5) : int(v*k+0.5)}')
+      FKDZ=$(awk -v z="$DZ" -v k="$BEST_KZ" 'BEGIN{printf "%.4f", 1+(z-1)*k}')
+      echo "  クリップ$((i+1)): ${BEST_LABEL}を採用しました(ずれの大きさ ${MAG0} → ${BEST_MAG})"
+      echo "  本番品質で補正をかけ直します..."
+      FPCT=$(apply_drift_fix_ "stage_clip_raw_$i.mp4" "drift_final_$i.mp4" "$FKDX" "$FKDY" "$FKDZ") || {
+        echo "  本番品質の補正に失敗したため、そのまま使います"
+        tail -3 err_driftfix.log 2>/dev/null || true
+        continue
+      }
+      [ -f "drift_final_$i.mp4.geom" ] && mv "drift_final_$i.mp4.geom" "drift_geom_$i.txt"
+      mv "drift_final_$i.mp4" "stage_clip_raw_$i.mp4"
+      DRIFT_ZOOM_PCT="$FPCT"
+      echo "  クリップ$((i+1)): 拡大${FPCT}%で仕上げました"
     else
       echo "  クリップ$((i+1)): どの強さでも改善しなかったため、補正せずそのまま使います"
     fi
@@ -856,29 +937,30 @@ SKY_FREEZE_ENABLED=1
 # onsen_night_terrace の構図はこうなっている:
 #   0〜41%  星空
 #   41〜47% 山の稜線
-#   47〜58% 雲海
+#   43〜50% 白い雲海
 #   50〜62% 右手の草木
 #   60%〜   石のテラス・灯籠
 #   66%〜   湯船
 #
-# 【58から42に下げた理由】
-# 58%だと雲海も草木もまるごと止まり、映像全体が絵のように見えていた。
-# 動画としての気配が欲しいので、止めるのは星空だけにする。
+# 【42から46に上げた理由】
+# 42%だと雲海がまるごと動き、速く感じられた。
+# 雲の速さはクリップに焼き込まれていて後から変えられないので、
+# 動いている面積を減らすことで印象を和らげる。
 #
-# ループクリップは「空と雲海は完全に静止」という指示で生成しているので、
-# 固定を外しても大きくは動かない。ごくゆっくり流れる程度になる。
+# 46%なら雲海の上半分が止まり、下半分だけがゆっくり動く。
+# 草木(50%〜)は動いたまま。
 #
-#   42 … 星空だけを止める。雲海と草木は動く(現在)
-#   58 … 雲海まで止める。動きが乏しく絵のように見えた
+#   42 … 雲海がまるごと動く。速く感じられた
+#   46 … 雲海の上半分を止める(現在)
+#   50 … 雲海をほぼ止める。動きが乏しくなる
 #
 # 星を止めているのは、LTXが星を不規則に明滅させて
-# ちらついて見えるため。星の瞬きはこちらで描いている。
+# ちらついて見えるため。
 #
 # ※テーマを変えたら構図も変わる。この値も測り直すこと
-SKY_FREEZE_HEIGHT=42
+SKY_FREEZE_HEIGHT=46
 
 # その下の、徐々に映像へ戻していく帯の幅(%)
-# 42〜50%は山の稜線。動かないものなので境目は見えない
 SKY_FREEZE_FEATHER=8
 
 if [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]; then
