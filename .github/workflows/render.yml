@@ -98,11 +98,146 @@ jobs:
           echo "tag=${LABEL}_video-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
           echo "label=${LABEL}" >> $GITHUB_OUTPUT
 
+      # ============================================================
+      # 効果音を立ち上げる位置を、導入部を見て決める
+      #
+      # 【なぜGitHub側でやるか】
+      # GAS側で同じことを試したが、動画をメモリに読み込む時点で
+      # 容量不足になった(50MBの送信上限とメモリ不足の両方に当たった)。
+      # こちらはffmpegがあるので、480pxまで縮めてから渡せる。
+      # データ量が数十分の一になり、制限に引っかからない。
+      #
+      # 【何を決めるか】
+      # カメラワークは生成のたびに変わる。室内から歩き出す構図もあれば、
+      # 最初から湯船のそばにいる構図もある。決め打ちの秒数では合わない。
+      # 湯船が画面に現れる秒数を答えさせ、その手前から音を立ち上げる。
+      # ============================================================
+      - name: Decide audio timing with Gemini
+        id: audiotiming
+        if: ${{ steps.params.outputs.label == 'youtubelong' }}
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          INTRO_VIDEO_URL: ${{ steps.params.outputs.intro_video_url }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ] || [ -z "$INTRO_VIDEO_URL" ]; then
+            echo "判断に必要な情報がないため、既定のタイミングを使います"
+            exit 0
+          fi
+
+          curl -fL -sS --retry 2 -o intro_for_check.mp4 "$INTRO_VIDEO_URL" || {
+            echo "導入部を取得できなかったため、既定のタイミングを使います"; exit 0; }
+
+          # 480px・10fpsまで落とす。カメラの位置と湯船の登場を見るには十分で、
+          # データ量は数十分の一になる
+          ffmpeg -y -v error -i intro_for_check.mp4 -t 25 \
+            -vf "scale=480:-2,fps=10" -an -c:v libx264 -preset veryfast -crf 32 \
+            intro_small.mp4 2>/dev/null || {
+            echo "縮小に失敗したため、既定のタイミングを使います"; exit 0; }
+
+          ls -la intro_small.mp4
+
+          cat << 'PYEOF' > decide_audio.py
+          import os, json, base64, urllib.request
+
+          api_key = os.environ['GEMINI_API_KEY']
+          url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}'
+
+          with open('intro_small.mp4', 'rb') as f:
+              data = base64.b64encode(f.read()).decode('utf-8')
+
+          prompt = """旅館の導入部の動画です。このあと湯の流れる効果音を重ねます。
+          その音をいつ立ち上げるべきかを判断してください。
+
+          【見てほしいこと】
+          1. 湯船や流れ落ちる湯が画面に現れるのは何秒あたりか
+          2. 最初の時点で、カメラは湯船からどのくらい離れているか
+             (室内の奥にいる / 戸口の近く / すでに湯船のそば)
+
+          【決め方】
+          openStart は、水が見え始める4〜5秒前にしてください。
+          音は立ち上がりきるまでに時間がかかるため、
+          見え始める直前から鳴らし始めると、満ちるのが遅れて感じられます。
+          水が画面に出た時点で、すでに音が十分に鳴っている状態が理想です。
+
+          farVolume は、水が見えていないあいだの音量です。
+            カメラが室内の奥にいて湯船がまったく見えない → 0
+            戸口の近くで、外の気配がある → 0.2
+            最初から湯船が画面にある → 0.5
+
+          openDuration は立ち上げにかける秒数です。
+          長くすると音が満ちるのが遅れるので、短めを基本にしてください。
+          カメラがゆっくり近づくなら5〜6秒、一気に湯船が現れるなら3秒。
+
+          出力はJSONのみ:
+          {"waterAppearsAt": 9, "openStart": 4, "openDuration": 4, "farVolume": 0, "reason": "理由を一文で"}
+          説明文やマークダウンは含めないでください。"""
+
+          payload = {
+              'contents': [{'parts': [
+                  {'inlineData': {'mimeType': 'video/mp4', 'data': data}},
+                  {'text': prompt}
+              ]}],
+              'generationConfig': {'responseMimeType': 'application/json'}
+          }
+
+          result = None
+          for attempt in (1, 2):
+              req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'),
+                                           headers={'Content-Type': 'application/json'})
+              try:
+                  with urllib.request.urlopen(req, timeout=300) as res:
+                      body = json.loads(res.read().decode('utf-8'))
+                  text = next(p['text'] for p in body['candidates'][0]['content']['parts'] if 'text' in p)
+                  result = json.loads(text)
+                  break
+              except Exception as e:
+                  print(f'{attempt}回目に失敗しました:', e)
+                  if attempt == 2:
+                      raise SystemExit(0)
+
+          if result is None:
+              raise SystemExit(0)
+
+          def num(v, lo, hi, default):
+              try:
+                  x = float(v)
+              except (TypeError, ValueError):
+                  return default
+              return max(lo, min(hi, x))
+
+          water = num(result.get('waterAppearsAt'), 0, 30, 9)
+          dur = num(result.get('openDuration'), 2, 10, 5)
+          start = num(result.get('openStart'), 0, 30, water - 5)
+          far = num(result.get('farVolume'), 0, 1, 0)
+
+          # 水が見えた時点で鳴りきっているように、必要なら前倒しする
+          if start + dur > water:
+              start = max(0, water - dur)
+
+          print(f'水が現れるのは {water:.0f}秒あたり')
+          print(f'音の立ち上げ: {start:.0f}秒から{dur:.0f}秒かけて')
+          print(f'それまでの音量: {far}')
+          if result.get('reason'):
+              print('理由:', result['reason'])
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'open_start={start:.0f}\n')
+              f.write(f'open_duration={dur:.0f}\n')
+              f.write(f'far_volume={far}\n')
+          PYEOF
+          python3 decide_audio.py
+
       - name: Render video
         env:
           AMBIENT_SOUND_URL: ${{ steps.params.outputs.ambient_sound_url }}
           PARTICLE_KEY: ${{ steps.params.outputs.particle_key }}
           TRANSITIONS: ${{ steps.params.outputs.transitions }}
+          # 効果音を立ち上げる位置(1つ前の工程でGeminiが判断した値)
+          # 空ならレンダリング側が既定のタイミングを使う
+          AUDIO_OPEN_START: ${{ steps.audiotiming.outputs.open_start }}
+          AUDIO_OPEN_DURATION: ${{ steps.audiotiming.outputs.open_duration }}
+          AUDIO_FAR_VOLUME: ${{ steps.audiotiming.outputs.far_volume }}
         run: |
           chmod +x render.sh
           if [ -f render_bgm_weather.sh ]; then chmod +x render_bgm_weather.sh; fi
