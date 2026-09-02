@@ -187,6 +187,26 @@ LOOP_SLOWDOWN_MODE=mci
 # どちらが効いているかがはっきりする(追加費用はかからない)。
 DRIFT_CORRECTION_ENABLED=1
 
+# ---- 出力するフレームレート ----
+#
+# 【30固定をやめた理由】
+# LTXのクリップは25fpsで出てくる。それを30fpsに変換すると、
+# 足りない1枚を直前のコマの複製で埋めることになる。
+# 6コマに1枚が複製なので、0.2秒ごとに動きが止まっては飛ぶ。
+#
+# 実際、完成した動画の導入部を1コマずつ測ったところ、
+# 0.2秒周期で「変化0.01 → 変化7.0」を繰り返していた。
+# これが「ループに入る直前のブレ」の正体だった。
+#
+# 素材が25fpsなら25fpsのまま出せば、複製は一切発生しない。
+# ループ側で中間フレームを作る必要も減る。
+#
+# ※YouTubeは25fpsをそのまま受け付ける。問題ない。
+OUTPUT_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "stage_clip_raw_0.mp4" 2>/dev/null \
+             | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
+if [ -z "$OUTPUT_FPS" ] || awk -v f="$OUTPUT_FPS" 'BEGIN{exit !(f<1)}'; then OUTPUT_FPS=30; fi
+echo "出力フレームレート: ${OUTPUT_FPS}fps(素材に合わせています)"
+
 # 【診断用】導入部とループクリップの解像度を記録しておく
 # 両者の縦横比が違うと、画面に収める際の拡大率が変わり、
 # 切り替わる瞬間に画が広がったように見えてしまう
@@ -814,18 +834,38 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
   done
 fi
 
+# 【等速でフレームレートも同じなら、何もしない】
+#
+# 速度1.0のまま中間フレームを作っても、結果は元と変わらない。
+# それどころか推測で描いたコマに置き換わるぶん、わずかに眠くなる。
+# 20秒のクリップに数分かかる処理なので、飛ばせるなら飛ばす。
+SKIP_SLOWDOWN=false
+if awk -v s="$LOOP_SPEED" 'BEGIN{exit !(s > 0.99 && s < 1.01)}'; then
+  CLIP_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "stage_clip_raw_0.mp4" 2>/dev/null \
+             | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
+  if [ -n "$CLIP_FPS" ] && awk -v a="$CLIP_FPS" -v b="$OUTPUT_FPS" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d < 0.01)}'; then
+    SKIP_SLOWDOWN=true
+  fi
+fi
+
+if [ "$SKIP_SLOWDOWN" = true ]; then
+  echo "等速でフレームレートも一致しているため、速度の加工は行いません(そのまま使います)"
+  for ((i=0; i<CLIP_COUNT; i++)); do
+    cp "stage_clip_raw_$i.mp4" "stage_clip_$i.mp4"
+  done
+else
 echo "ループクリップの再生速度を${LOOP_SPEED}倍に落とします(雲の流れを導入部に合わせるため)..."
 echo "  中間フレームの作り方: ${LOOP_SLOWDOWN_MODE}"
 for ((i=0; i<CLIP_COUNT; i++)); do
   case "$LOOP_SLOWDOWN_MODE" in
     mci)
-      SLOW_VF="setpts=PTS/${LOOP_SPEED},minterpolate=fps=30:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+      SLOW_VF="setpts=PTS/${LOOP_SPEED},minterpolate=fps=${OUTPUT_FPS}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
       ;;
     blend)
-      SLOW_VF="setpts=PTS/${LOOP_SPEED},minterpolate=fps=30:mi_mode=blend"
+      SLOW_VF="setpts=PTS/${LOOP_SPEED},minterpolate=fps=${OUTPUT_FPS}:mi_mode=blend"
       ;;
     *)
-      SLOW_VF="setpts=PTS/${LOOP_SPEED},fps=30"
+      SLOW_VF="setpts=PTS/${LOOP_SPEED},fps=${OUTPUT_FPS}"
       ;;
   esac
 
@@ -836,7 +876,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     NEW_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_clip_$i.mp4")
     echo "  クリップ$((i+1)): ${RAW_DUR}秒 → ${NEW_DUR}秒"
   elif [ "$LOOP_SLOWDOWN_MODE" != "dup" ] && ffmpeg -y -i "stage_clip_raw_$i.mp4" \
-       -vf "setpts=PTS/${LOOP_SPEED},fps=30" -an \
+       -vf "setpts=PTS/${LOOP_SPEED},fps=${OUTPUT_FPS}" -an \
        -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p "stage_clip_$i.mp4" 2>"err_speed2_$i.log"; then
     echo "  クリップ$((i+1)): 中間フレームの生成に失敗したため、複製で埋める方式で作りました"
     tail -3 "err_speed_$i.log" || true
@@ -859,6 +899,7 @@ print('%d%%' % (s*100//max(1,len(f)-1)))
 " 2>/dev/null || echo "不明")
   echo "  クリップ$((i+1)): 直前とまったく同じフレームの割合 ${DUP}(高いほどカクつきます)"
 done
+fi
 
 # ループの継ぎ目の差を測る
 #
@@ -1120,6 +1161,29 @@ fi
 # ---- ①-3 クリップをシームレスループに加工する ----
 
 
+# 導入部の終わりを、ループの末尾で置き換える秒数
+#
+# 【何のためか】
+# ループクリップは導入部の最終フレーム(静止画)から生成される。
+# 静止画には「動きの情報」がないため、LTXは湯気の勢いや向きを
+# ゼロから作り直す。結果、絵は繋がっていても動きが繋がらない。
+#
+# 【どう解決するか】
+# ループの末尾は、ループの先頭と繋がるように作ってある。
+# そこで導入部の最後の数秒を捨て、代わりにループの末尾を置く。
+# 切り替わる直前にはすでにループの湯気が流れている状態になり、
+# 勢いの段差が消える。
+#
+# 段差は導入部側(数秒手前)に移るが、そこはまだカメラが動いている
+# 最中なので、湯気の変化が動きに紛れて気づかれにくい。
+#
+#   0 … 置き換えない(従来どおり)
+#   4 … 最後の4秒をループの末尾に置き換える(現在)
+#   6 … より長く置き換える。カメラの動きとの噛み合いが悪くなる可能性
+#
+# ※導入部の実質の尺(INTRO_HEAD_CUTを引いた後)より短くすること
+INTRO_HANDOVER=4
+
 # 導入部とループの境目を溶かす秒数
 #
 # 【0から1に戻した理由】
@@ -1191,7 +1255,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
 [0:v]trim=start=0:end=${XFADE_LOOP},setpts=PTS-STARTPTS[head];\
 [tail][head]xfade=transition=fade:duration=${XFADE_LOOP}:offset=0[wrap];\
 [main][wrap]concat=n=2:v=1[out]" \
-      -map "[out]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r 30 -an "stage_loop_$i.mp4" 2>"err_loop_$i.log"; then
+      -map "[out]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "stage_loop_$i.mp4" 2>"err_loop_$i.log"; then
     LOOP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_loop_$i.mp4")
     SEAM_AFTER=$(seam_score_ "stage_loop_$i.mp4")
     echo "  クリップ$((i+1)): ${XFADE_LOOP}秒かけて溶かしました(${CLIP_DUR}秒 → ${LOOP_DUR}秒)"
@@ -1206,7 +1270,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     #   [導入部 …元の0秒][元の0〜3秒][加工済みループ(3秒地点から)]…
     # こうすれば全ての繋ぎ目が連続する。
     ffmpeg -y -i "stage_clip_$i.mp4" -t "$XFADE_LOOP" \
-      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r 30 -an "loop_head_$i.mp4" 2>"err_head_$i.log"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "loop_head_$i.mp4" 2>"err_head_$i.log"
 
     mv "stage_loop_$i.mp4" "stage_clip_$i.mp4"
   else
@@ -1253,7 +1317,9 @@ echo "境目ごとの変化速度: ${XFADE_DURATIONS[*]:-なし(段階が1つの
 # 間隔を詰めるとファイルが1〜2割大きくなるため、
 # 切り出しが発生しない1段階のときは既定のままにしておく(Releaseの2GB制限対策)。
 if [ "$CLIP_COUNT" -gt 1 ]; then
-  GOP_OPTS="-g 15 -keyint_min 15 -sc_threshold 0"
+  # キーフレーム間隔を0.5秒にする(フレームレートの半分)
+  GOP_HALF=$(awk -v f="$OUTPUT_FPS" 'BEGIN{v=int(f/2+0.5); if(v<1)v=1; print v}')
+  GOP_OPTS="-g ${GOP_HALF} -keyint_min ${GOP_HALF} -sc_threshold 0"
   echo "キーフレーム間隔を0.5秒に設定します(境目の切り出しを正確にするため)"
 else
   GOP_OPTS=""
@@ -1339,11 +1405,11 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     # それを再エンコードなしで並べれば結果は同じで、数十分の処理が数秒になる。
     ffmpeg -y -i "stage_clip_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_unit_$i.mp4"
+      -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "stage_unit_$i.mp4"
     ffmpeg -y -stream_loop -1 -i "stage_unit_$i.mp4" -t "$BODY_LEN" -c copy "stage_body_$i.mp4"
     ffmpeg -y -i "loop_head_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_headpart_$i.mp4"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "stage_headpart_$i.mp4"
 
     # 導入部の末尾を切り出して、ループの先頭と溶かし合わせる
     INTRO_REAL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video.mp4)
@@ -1354,20 +1420,51 @@ for ((i=0; i<CLIP_COUNT; i++)); do
 
     # ループ先頭部分を「境目で溶かす分」と「そのまま流す分」に分ける
     ffmpeg -y -i "stage_headpart_$i.mp4" -t "$XFADE_INTRO" \
-      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_blend_$i.mp4"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "head_blend_$i.mp4"
     HAS_HEAD_REST=false
     if awk "BEGIN{exit !($HEAD_REST > 0.05)}"; then
       ffmpeg -y -ss "$XFADE_INTRO" -i "stage_headpart_$i.mp4" \
-        -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_rest_$i.mp4" \
+        -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "head_rest_$i.mp4" \
         && HAS_HEAD_REST=true
+    fi
+
+    # ---- 導入部の終わりを、ループの末尾で置き換える ----
+    #
+    # ループの末尾を先に流しておけば、切り替わる直前には
+    # すでにループの湯気が流れている状態になる。
+    HANDOVER_OK=false
+    if awk "BEGIN{exit !($INTRO_HANDOVER > 0.05)}"; then
+      # ループ1周期の末尾から、置き換える秒数ぶんを切り出す
+      UNIT_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "stage_unit_$i.mp4" 2>/dev/null)
+      if [ -n "$UNIT_DUR" ] && awk -v u="$UNIT_DUR" -v h="$INTRO_HANDOVER" 'BEGIN{exit !(u > h + 0.5)}'; then
+        HAND_FROM=$(awk -v u="$UNIT_DUR" -v h="$INTRO_HANDOVER" 'BEGIN{printf "%.3f", u - h}')
+        if ffmpeg -y -ss "$HAND_FROM" -i "stage_unit_$i.mp4" -t "$INTRO_HANDOVER" -an \
+             -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" \
+             "handover_$i.mp4" 2>"err_handover_$i.log"; then
+          HANDOVER_OK=true
+          echo "  段階1: 導入部の最後${INTRO_HANDOVER}秒を、ループの末尾に置き換えます(湯気の勢いを繋ぐため)"
+        else
+          echo "  段階1: 置き換えに失敗したため、従来どおり繋ぎます"
+          tail -3 "err_handover_$i.log" 2>/dev/null || true
+        fi
+      else
+        echo "  段階1: ループが短いため、置き換えは行いません"
+      fi
     fi
 
     # 【溶かさない指定のときは直結する】
     # xfade は長さ0では動かない。枠を揃えてあるので、
     # そのまま繋いでも位置は一致する。
     if awk "BEGIN{exit !($XFADE_INTRO < 0.05)}"; then
-      printf "file 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
-      echo "  段階1: 導入部とループを溶かさずに直結します"
+      if [ "$HANDOVER_OK" = true ]; then
+        # 置き換え用の映像を先頭に足す。導入部側はそのぶん短く切る。
+        printf "file 'handover_%d.mp4'\nfile 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" "$i" > "headjoin_$i.txt"
+        INTRO_TRIM=$(awk -v e="$INTRO_EFFECTIVE" -v h="$INTRO_HANDOVER" 'BEGIN{v=e-h; if(v<1) v=e; print v}')
+        echo "  段階1: 導入部を${INTRO_TRIM}秒に切り詰め、そのあとループの末尾を挟んで直結します"
+      else
+        printf "file 'stage_headpart_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
+        echo "  段階1: 導入部とループを溶かさずに直結します"
+      fi
       ffmpeg -y -f concat -safe 0 -i "headjoin_$i.txt" -c copy "stage_$i.mp4"
       SKIP_BOUNDARY=true
     else
@@ -1378,12 +1475,23 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     # 補正の拡大がループ側にだけ掛かると、切り替わる瞬間に画が一回り大きくなる。
     if [ "$SKIP_BOUNDARY" = true ]; then
       :
+    elif [ "$HANDOVER_OK" = true ] \
+       && ffmpeg -y -i "handover_$i.mp4" -i "head_blend_$i.mp4" \
+         -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XFADE_INTRO}:offset=$(awk -v h="$INTRO_HANDOVER" -v x="$XFADE_INTRO" 'BEGIN{v=h-x; if(v<0) v=0; printf "%.3f", v}')[v]" \
+         -map "[v]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "boundary.mp4" 2>"err_boundary.log"; then
+      if [ "$HAS_HEAD_REST" = true ]; then
+        printf "file 'boundary.mp4'\nfile 'head_rest_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
+      else
+        printf "file 'boundary.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" > "headjoin_$i.txt"
+      fi
+      INTRO_TRIM=$(awk -v e="$INTRO_EFFECTIVE" -v h="$INTRO_HANDOVER" 'BEGIN{v=e-h; if(v<1) v=e; print v}')
+      echo "  段階1: 導入部を${INTRO_TRIM}秒に切り詰め、ループの末尾を挟んで${XFADE_INTRO}秒かけて溶かします"
     elif ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
-         -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
+         -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=${OUTPUT_FPS}" \
          -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p "intro_tail.mp4" 2>"err_introtail.log" \
        && ffmpeg -y -i "intro_tail.mp4" -i "head_blend_$i.mp4" \
          -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XFADE_INTRO}:offset=0[v]" \
-         -map "[v]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "boundary.mp4" 2>"err_boundary.log"; then
+         -map "[v]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "boundary.mp4" 2>"err_boundary.log"; then
       if [ "$HAS_HEAD_REST" = true ]; then
         printf "file 'boundary.mp4'\nfile 'head_rest_%d.mp4'\nfile 'stage_body_%d.mp4'\n" "$i" "$i" > "headjoin_$i.txt"
       else
@@ -1403,7 +1511,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     # ここも同じ考え方: 1周期だけ作り、コピーで必要な長さまで並べる
     ffmpeg -y -i "stage_clip_$i.mp4" \
       -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-      -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "stage_unit_$i.mp4"
+      -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "stage_unit_$i.mp4"
     ffmpeg -y -stream_loop -1 -i "stage_unit_$i.mp4" -t "$STAGE_DURATION" -c copy "stage_$i.mp4"
   fi
 
@@ -1413,11 +1521,11 @@ for ((i=0; i<CLIP_COUNT; i++)); do
   if [ "$(awk "BEGIN{print ($AFTER > 0)}")" = "1" ]; then
     TAIL_START=$(awk "BEGIN{print $STAGE_DURATION - $AFTER}")
     ffmpeg -y -ss "$TAIL_START" -i "stage_$i.mp4" -t "$AFTER" \
-      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "tail_$i.mp4"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "tail_$i.mp4"
   fi
   if [ "$(awk "BEGIN{print ($BEFORE > 0)}")" = "1" ]; then
     ffmpeg -y -i "stage_$i.mp4" -t "$BEFORE" \
-      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "head_$i.mp4"
+      -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "head_$i.mp4"
   fi
 
   # 本体部分(境目に供出した分を除いた中間部分)を切り出す
@@ -1440,7 +1548,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
     echo "  段階$((i+1))→$((i+2)): ${XF}秒のクロスフェード"
     ffmpeg -y -i "tail_$i.mp4" -i "head_$((i+1)).mp4" \
       -filter_complex "[0:v][1:v]xfade=transition=fade:duration=${XF}:offset=0[v]" \
-      -map "[v]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r 30 -an "xfade_$i.mp4"
+      -map "[v]" -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "xfade_$i.mp4"
     echo "file 'xfade_$i.mp4'" >> concat_loop.txt
   fi
 done
@@ -1545,7 +1653,7 @@ if [ -n "${INTRO_TRIM:-}" ]; then
   echo "  境目に使った末尾${XFADE_INTRO}秒を導入部から取り除きます(実際に使う導入部: ${INTRO_KEEP}秒)"
 fi
 ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
-  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=30" \
+  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=${OUTPUT_FPS}" \
   -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
