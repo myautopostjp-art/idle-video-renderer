@@ -166,10 +166,12 @@ jobs:
              (室内の奥にいる / 戸口の近く / すでに湯船のそば)
 
           【決め方】
-          openStart は、水が見え始める4〜5秒前にしてください。
+          openStart は、水が見え始める7〜8秒前にしてください。
           音は立ち上がりきるまでに時間がかかるため、
           見え始める直前から鳴らし始めると、満ちるのが遅れて感じられます。
-          水が画面に出た時点で、すでに音が十分に鳴っている状態が理想です。
+          実際、4〜5秒前から立ち上げても「映像より遅れて聞こえる」と指摘された。
+          水が画面に出た時点で、すでに音が完全に鳴りきっている状態が理想です。
+          早すぎるぶんには不自然になりません(遠くの水音として自然に聞こえる)。
 
           farVolume は、水が見えていないあいだの音量です。
             カメラが室内の奥にいて湯船がまったく見えない → 0
@@ -178,7 +180,7 @@ jobs:
 
           openDuration は立ち上げにかける秒数です。
           長くすると音が満ちるのが遅れるので、短めを基本にしてください。
-          カメラがゆっくり近づくなら5〜6秒、一気に湯船が現れるなら3秒。
+          カメラがゆっくり近づくなら4秒、一気に湯船が現れるなら2〜3秒。
 
           出力はJSONのみ:
           {"waterAppearsAt": 9, "openStart": 4, "openDuration": 4, "farVolume": 0, "reason": "理由を一文で"}
@@ -223,8 +225,10 @@ jobs:
           far = num(result.get('farVolume'), 0, 1, 0)
 
           # 水が見えた時点で鳴りきっているように、必要なら前倒しする
-          if start + dur > water:
-              start = max(0, water - dur)
+          # さらに2秒の余裕を持たせる(遅れて聞こえるという指摘があったため)
+          MARGIN = 2.0
+          if start + dur > water - MARGIN:
+              start = max(0, water - dur - MARGIN)
 
           print(f'水が現れるのは {water:.0f}秒あたり')
           print(f'音の立ち上げ: {start:.0f}秒から{dur:.0f}秒かけて')
@@ -742,6 +746,14 @@ jobs:
 
           # Geminiによる動画レビュー結果(YouTube長尺のみ。改行は|で連結されている)
           VIDEO_REVIEW='${{ steps.videocheck.outputs.result }}'
+
+          # レンダリング側の検品で問題が見つかっていれば、それも伝える
+          # (完成品を渡す前に気づけるようにするため)
+          if [ -f quality_warning.txt ]; then
+            WARN=$(cat quality_warning.txt | tr '\n' '/')
+            VIDEO_REVIEW="【検品で問題あり】${WARN} ${VIDEO_REVIEW}"
+            echo "※検品で問題が見つかっています: $WARN"
+          fi
 
           curl -s -L -X POST "${{ vars.GAS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
