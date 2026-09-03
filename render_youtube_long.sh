@@ -77,15 +77,42 @@ CLIP_PRESET=medium
 # intro_video.mp4 という名前で保存して正常終了してしまい、
 # 数ステップ先のffmpegが意味不明なエラーで落ちて原因が追えなかった。
 # -f を付ければ、その場でダウンロード失敗として止まる。
+# 【中身が本当に読めるかまで確かめる】
+#
+# -f を付けても、Driveは「まだ公開が反映されていない」ときに
+# 警告ページのHTMLを200番で返してくる。
+# するとHTMLを intro_video.mp4 という名前で保存して正常終了し、
+# 数ステップ先のffmpegが「moov atom not found」で落ちる。
+#
+# 保存した直後の動画は、外から見えるようになるまで時間差があるため、
+# ffprobeで開けるか確かめ、駄目なら待ってやり直す。
 download_or_die_() {
   local url="$1" out="$2" label="$3"
+  local attempt waitSec size
   echo "${label}をダウンロード中..."
-  if ! curl -fL -sS --retry 2 --retry-delay 3 -o "$out" "$url"; then
-    echo "エラー: ${label}のダウンロードに失敗しました"
-    echo "  URL: $url"
-    echo "  Driveの共有設定が「リンクを知っている全員」になっているか確認してください"
-    exit 1
-  fi
+  for attempt in 1 2 3 4 5; do
+    curl -fL -sS --retry 2 --retry-delay 3 -o "$out" "$url" 2>/dev/null || true
+
+    # 音声・映像どちらでも、ffprobeで長さが読めれば中身は正常
+    if ffprobe -v error -show_entries format=duration -of csv=p=0 "$out" >/dev/null 2>&1; then
+      [ "$attempt" -gt 1 ] && echo "  ${attempt}回目で取得できました"
+      return 0
+    fi
+
+    size=$(stat -c%s "$out" 2>/dev/null || echo 0)
+    if [ "$attempt" = "5" ]; then
+      echo "エラー: ${label}を取得できませんでした(${size}バイト)"
+      echo "  URL: $url"
+      echo "  受け取った中身の先頭:"
+      head -c 200 "$out" 2>/dev/null || true
+      echo ""
+      echo "  Driveの共有設定が「リンクを知っている全員」になっているか確認してください"
+      exit 1
+    fi
+    waitSec=$((attempt * 10))
+    echo "  まだ読めません(${size}バイト)。${waitSec}秒待ってやり直します(${attempt}/5)"
+    sleep "$waitSec"
+  done
 }
 
 download_or_die_ "$INTRO_VIDEO_URL" intro_video.mp4 "導入動画"
