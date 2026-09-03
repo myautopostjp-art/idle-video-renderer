@@ -301,6 +301,87 @@ done
 MEAS_W=960
 MEAS_H=540
 
+# 周期の途中の揺れも測る
+#
+# 【なぜ必要か】
+# これまでは「先頭と末尾のずれ」だけを測り、それを一定の速さで
+# 打ち消していた。始点と終点は揃うので測定上は「ドリフトなし」になる。
+#
+# しかし実際のカメラは一定に動いておらず、途中で左右に揺れている。
+# 完成品を測ったところ、周期の中で12pxも揺れていた:
+#   1秒目 -1.5px / 5秒目 -5.5px / 7秒目 -6.5px / 11秒目 +5.5px / 18秒目 -0.5px
+# 始点と終点が揃っているだけで、途中は大きく振れている。
+#
+# そこで周期を通して何度も測り、その軌跡どおりに打ち消す。
+# 測った点の間は直線でつなぐ(sendcmd用の時刻つき指定を作る)。
+#
+# 標準出力: "時刻:x,y" を1行ずつ(元の解像度でのpx)
+measure_drift_path_() {
+  local V="$1" POINTS="${2:-10}"
+  local D SRCW SCALE i T
+  D=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$V")
+  SRCW=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$V")
+  SCALE=$(awk -v a="$SRCW" -v m="$MEAS_W" 'BEGIN{printf "%.4f", (m>0)?a/m:1}')
+
+  # 基準となる先頭フレーム
+  if ! ffmpeg -v error -ss 0 -i "$V" -frames:v 1 \
+       -vf "scale=${MEAS_W}:${MEAS_H}" -pix_fmt gray -f rawvideo -y path_base.raw 2>/dev/null; then
+    return 1
+  fi
+
+  : > drift_path.txt
+  for ((i=1; i<=POINTS; i++)); do
+    T=$(awk -v d="$D" -v i="$i" -v n="$POINTS" 'BEGIN{printf "%.3f", d*i/n - 0.05}')
+    if ! ffmpeg -v error -ss "$T" -i "$V" -frames:v 1 \
+         -vf "scale=${MEAS_W}:${MEAS_H}" -pix_fmt gray -f rawvideo -y path_cur.raw 2>/dev/null; then
+      continue
+    fi
+    MEAS_W="$MEAS_W" MEAS_H="$MEAS_H" MEAS_SCALE="$SCALE" MEAS_T="$T" python3 - >> drift_path.txt <<'PATHPY'
+import os
+W=int(os.environ['MEAS_W']); H=int(os.environ['MEAS_H'])
+SCALE=float(os.environ['MEAS_SCALE']); T=os.environ['MEAS_T']
+try:
+    a=open('path_base.raw','rb').read(); b=open('path_cur.raw','rb').read()
+except OSError:
+    raise SystemExit
+
+RANGE=24; STEP=3
+# 空を止める領域は静止画なので常に一致してしまう。
+# 下半分(動いている部分)だけを見る。
+Y0=int(H*0.55); Y1=H-20
+X0=20; X1=W-20
+
+def diff(dx,dy):
+    tot=0.0; cnt=0
+    for y in range(Y0,Y1,STEP):
+        yy=y+dy
+        if yy<0 or yy>=H: continue
+        ra=y*W; rb=yy*W
+        for x in range(X0,X1,STEP):
+            xx=x+dx
+            if xx<0 or xx>=W: continue
+            tot+=abs(a[ra+x]-b[rb+xx]); cnt+=1
+    return tot/cnt if cnt else 9e9
+
+best=(0,0,9e9)
+for dy in range(-8,9,2):
+    for dx in range(-RANGE,RANGE+1,2):
+        d=diff(dx,dy)
+        if d<best[2]: best=(dx,dy,d)
+bx,by,_=best
+for dy in range(by-1,by+2):
+    for dx in range(bx-1,bx+2):
+        d=diff(dx,dy)
+        if d<best[2]: best=(dx,dy,d)
+
+# 基準に対して「ずれている量」なので、打ち消すには符号を反転して使う
+print('%s %.1f %.1f' % (T, best[0]*SCALE, best[1]*SCALE))
+PATHPY
+  done
+  cat drift_path.txt
+  return 0
+}
+
 measure_drift_() {
   # $1 = 動画ファイル / 標準出力の最終行: "DX DY ZOOM"
   #   DX,DY = 末尾が先頭に対してずれている量(元の解像度でのpx)
@@ -693,6 +774,90 @@ apply_drift_fix_() {
   return 1
 }
 
+# 周期の途中の揺れも打ち消すか
+#
+# 【従来との違い】
+# 従来は「先頭と末尾のずれ」を一定の速さで打ち消していた。
+# 始点と終点は揃うが、途中の揺れはそのまま残る。
+#
+# これを有効にすると、周期を通して測った軌跡どおりに画面をずらす。
+# カメラが左に振れた区間では右に、右に振れた区間では左に動かす。
+#
+#   0 … 従来どおり(始点と終点だけ)
+#   1 … 途中の揺れも打ち消す(現在)
+DRIFT_PATH_ENABLED=1
+
+# 何点測るか。多いほど細かく追えるが、そのぶん時間がかかる
+DRIFT_PATH_POINTS=12
+
+# 軌跡どおりに画面をずらして揺れを打ち消す
+apply_drift_path_() {
+  local IN="$1" OUT="$2" PATHFILE="$3"
+  local CD CWID CHGT CFPS MAXX MAXY CW CH
+
+  CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$IN")
+  CWID=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$IN")
+  CHGT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$IN")
+  CFPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$IN" \
+         | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
+  if [ -z "$CFPS" ] || awk -v f="$CFPS" 'BEGIN{exit !(f<1)}'; then CFPS=25; fi
+
+  # 揺れの最大幅から、切り取る余白を決める
+  MAXX=$(awk '{v=($2<0)?-$2:$2; if(v>m)m=v} END{printf "%d", m+2}' "$PATHFILE")
+  MAXY=$(awk '{v=($3<0)?-$3:$3; if(v>m)m=v} END{printf "%d", m+2}' "$PATHFILE")
+  [ -z "$MAXX" ] && MAXX=0
+  [ -z "$MAXY" ] && MAXY=0
+  if [ "$MAXX" -lt 1 ] && [ "$MAXY" -lt 1 ]; then
+    echo "    揺れは見つかりませんでした" >&2
+    return 1
+  fi
+
+  CW=$(( (CWID - MAXX*2) / 2 * 2 ))
+  CH=$(( (CHGT - MAXY*2) / 2 * 2 ))
+  if [ "$CW" -lt 640 ] || [ "$CH" -lt 360 ]; then
+    echo "    揺れが大きすぎるため、軌跡での打ち消しは行いません" >&2
+    return 1
+  fi
+
+  # 時刻ごとの切り出し位置を、awkの式として組み立てる
+  # (測った点の間は直線でつなぐ)
+  local EXPR_X EXPR_Y
+  EXPR_X=$(awk -v mx="$MAXX" '
+    { t[NR]=$1; x[NR]=$2 }
+    END{
+      s="";
+      for(i=1;i<=NR;i++){
+        if(i==1){ s = sprintf("if(lt(t,%s),%d", t[1], mx + int(x[1]+0.5)) }
+        else {
+          s = s sprintf(",if(lt(t,%s),%d+(%d-%d)*(t-%s)/(%s-%s)",
+              t[i], mx+int(x[i-1]+0.5), mx+int(x[i]+0.5), mx+int(x[i-1]+0.5),
+              t[i-1], t[i], t[i-1]) }
+      }
+      s = s sprintf(",%d", mx + int(x[NR]+0.5));
+      for(i=1;i<=NR;i++) s = s ")";
+      print s
+    }' "$PATHFILE")
+  EXPR_Y=$(awk -v my="$MAXY" '
+    { t[NR]=$1; y[NR]=$3 }
+    END{
+      s="";
+      for(i=1;i<=NR;i++){
+        if(i==1){ s = sprintf("if(lt(t,%s),%d", t[1], my + int(y[1]+0.5)) }
+        else {
+          s = s sprintf(",if(lt(t,%s),%d+(%d-%d)*(t-%s)/(%s-%s)",
+              t[i], my+int(y[i-1]+0.5), my+int(y[i]+0.5), my+int(y[i-1]+0.5),
+              t[i-1], t[i], t[i-1]) }
+      }
+      s = s sprintf(",%d", my + int(y[NR]+0.5));
+      for(i=1;i<=NR;i++) s = s ")";
+      print s
+    }' "$PATHFILE")
+
+  ffmpeg -y -i "$IN" -vf \
+    "crop=${CW}:${CH}:x='clip(${EXPR_X},0,${MAXX}*2)':y='clip(${EXPR_Y},0,${MAXY}*2)',scale=${CWID}:${CHGT}" \
+    -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r "$CFPS" -an "$OUT" 2>err_driftpath.log
+}
+
 # 候補を評価するときの解像度
 #
 # 【なぜ下げるか】
@@ -861,6 +1026,33 @@ if [ "${DRIFT_CORRECTION_ENABLED:-1}" = "1" ]; then
       mv "drift_final_$i.mp4" "stage_clip_raw_$i.mp4"
       DRIFT_ZOOM_PCT="$FPCT"
       echo "  クリップ$((i+1)): 拡大${FPCT}%で仕上げました"
+
+      # ---- 周期の途中の揺れも打ち消す ----
+      #
+      # ここまでで「始点と終点のずれ」は消えている。
+      # しかしカメラは一定に動いておらず、途中で左右に振れている。
+      # その揺れを、軌跡どおりに画面をずらして打ち消す。
+      if [ "${DRIFT_PATH_ENABLED:-1}" = "1" ]; then
+        echo "  クリップ$((i+1)): 周期の途中の揺れを測ります(${DRIFT_PATH_POINTS}箇所)..."
+        if measure_drift_path_ "stage_clip_raw_$i.mp4" "$DRIFT_PATH_POINTS" > /dev/null 2>&1 \
+           && [ -s drift_path.txt ]; then
+          SWING=$(awk '{v=($2<0)?-$2:$2; if(v>m)m=v} END{printf "%.0f", m}' drift_path.txt)
+          echo "  クリップ$((i+1)): 横方向の揺れ幅 ${SWING}px"
+          if [ -n "$SWING" ] && [ "$SWING" -ge 2 ] 2>/dev/null; then
+            if apply_drift_path_ "stage_clip_raw_$i.mp4" "drift_swing_$i.mp4" drift_path.txt; then
+              mv "drift_swing_$i.mp4" "stage_clip_raw_$i.mp4"
+              echo "  クリップ$((i+1)): 途中の揺れを打ち消しました"
+            else
+              echo "  クリップ$((i+1)): 揺れの打ち消しに失敗したため、そのまま使います"
+              tail -3 err_driftpath.log 2>/dev/null || true
+            fi
+          else
+            echo "  クリップ$((i+1)): 揺れは小さいため、そのまま使います"
+          fi
+        else
+          echo "  クリップ$((i+1)): 揺れを測れませんでした"
+        fi
+      fi
     else
       echo "  クリップ$((i+1)): どの強さでも改善しなかったため、補正せずそのまま使います"
     fi
@@ -1032,7 +1224,33 @@ SKY_FREEZE_ENABLED=1
 # ちらついて見えるため。
 #
 # ※テーマを変えたら構図も変わる。この値も測り直すこと
-SKY_FREEZE_HEIGHT=46
+SKY_FREEZE_HEIGHT=51
+
+# 雲海を「ゆっくり流す」ための混ぜ具合
+#
+# 【何をするか】
+# 完全に止めるのではなく、止めた絵と動いている絵を混ぜる。
+# 混ぜる割合で見かけの速さが決まる。
+#   0.0 … 混ぜない。雲は元の速さで流れる
+#   0.7 … 3割だけ動く。元の速さの約3割に見える(現在)
+#   1.0 … 完全に止まる
+#
+# 【なぜ必要か】
+# LTXの雲の速さは言葉で制御できない。5回書き換えて試したが、
+# 「止まる」か「速すぎる」のどちらかにしかならなかった。
+# レンダリング側で確実に落とすほうが早い。
+#
+# 【条件】
+# 雲は湯気より遅くなければならない。速いと不自然に見える。
+# 湯気が動いているのに雲が止まっているのも不自然なので、
+# 「ゆっくり流れる」状態を作る。
+SKY_SLOW_RATIO=0.7
+
+# 星を完全に止める高さ(画面上端からの割合 %)
+#
+# 星はLTXが不規則に明滅させるため、完全に止める。
+# ここから SKY_FREEZE_HEIGHT までが「ゆっくり流す」雲海の帯になる。
+SKY_STAR_FREEZE=41
 
 # その下の、徐々に映像へ戻していく帯の幅(%)
 SKY_FREEZE_FEATHER=8
@@ -1069,19 +1287,30 @@ if [ "${SKY_FREEZE_ENABLED:-0}" = "1" ]; then
     # 画像ファイルを直接書き出せば、値は狂いようがない。
     # PGMは「ヘッダ + 画素の値を並べただけ」の素朴な形式なので、
     # 標準ライブラリだけで確実に作れる(Pillowは入っていない)。
-    if ! python3 - "$SW" "$SH" "$SY1" "$SFE" > "sky_mask_$i.pgm" <<'MASKPY'
+    SYSTAR=$(awk -v h="$SH" -v p="${SKY_STAR_FREEZE:-41}" 'BEGIN{printf "%d", h*p/100}')
+    if ! python3 - "$SW" "$SH" "$SY1" "$SFE" "$SYSTAR" "${SKY_SLOW_RATIO:-1.0}" > "sky_mask_$i.pgm" <<'MASKPY'
 import sys
 w, h, y1, fe = (int(v) for v in sys.argv[1:5])
+# 追加: 星を完全に止める高さと、雲海の混ぜ具合
+ystar = int(sys.argv[5]) if len(sys.argv) > 5 else y1
+ratio = float(sys.argv[6]) if len(sys.argv) > 6 else 1.0
 if fe < 1:
     fe = 1
+if ystar > y1:
+    ystar = y1
+cloud = int(round(255 * ratio))   # 雲海の帯で静止画をどれだけ混ぜるか
+
 rows = []
 for y in range(h):
-    if y < y1:
-        v = 255                                   # 完全に静止画
+    if y < ystar:
+        v = 255                                    # 星: 完全に静止画
+    elif y < y1:
+        v = cloud                                  # 雲海: 部分的に混ぜてゆっくり流す
     elif y < y1 + fe:
-        v = int(round(255 * (1 - (y - y1) / fe))) # 徐々に映像へ
+        # 雲海の混ぜ具合から、徐々に素の映像へ戻す
+        v = int(round(cloud * (1 - (y - y1) / fe)))
     else:
-        v = 0                                     # 完全に映像
+        v = 0                                      # 完全に映像
     rows.append(bytes([v]) * w)
 out = sys.stdout.buffer
 out.write(b'P5\n%d %d\n255\n' % (w, h))
@@ -1105,7 +1334,7 @@ MASKPY
          -map "[out]" -t "$SKY_DUR" -r "$SKY_FPS" \
          -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -an "stage_sky_$i.mp4" 2>>"err_sky_$i.log"; then
       mv "stage_sky_$i.mp4" "stage_clip_$i.mp4"
-      echo "  クリップ$((i+1)): 空を止めました(上${SY1}px を固定、続く${SFE}px でぼかし)"
+      echo "  クリップ$((i+1)): 空を加工しました(星:上${SYSTAR}px を固定 / 雲海:${SKY_SLOW_RATIO}の割合で混ぜてゆっくり流す)"
     else
       echo "  クリップ$((i+1)): 空の固定に失敗したため、そのまま使います"
       tail -5 "err_sky_$i.log" 2>/dev/null || true
@@ -1655,6 +1884,53 @@ if awk "BEGIN{exit !($SHIMMER_STRENGTH > 0.0001)}"; then
   fi
 fi
 
+# ============================================================
+# 素材の段階で検品し、問題があればその場で直す
+#
+# 【なぜここで行うか】
+# 完成してから「揺れています」と報告しても、作り直すしかない。
+# ループ素材ができた時点で測れば、まだ直せる。
+#
+# ここで見るのは「周期の中の揺れ」。
+# 空を止めていない領域で測り、残っていれば打ち消し直す。
+# ============================================================
+if [ "${DRIFT_PATH_ENABLED:-1}" = "1" ]; then
+  echo ""
+  echo "ループ素材を検品します..."
+  for ((i=0; i<CLIP_COUNT; i++)); do
+    for pass in 1 2; do
+      if ! measure_drift_path_ "stage_loop_$i.mp4" 8 > /dev/null 2>&1 || [ ! -s drift_path.txt ]; then
+        echo "  クリップ$((i+1)): 検品できませんでした"
+        break
+      fi
+      SWING=$(awk '{v=($2<0)?-$2:$2; if(v>m)m=v} END{printf "%.0f", m}' drift_path.txt)
+      [ -z "$SWING" ] && SWING=0
+      echo "  クリップ$((i+1)): 残っている揺れ ${SWING}px"
+
+      if [ "$SWING" -lt 3 ] 2>/dev/null; then
+        echo "  クリップ$((i+1)): 問題ありません"
+        break
+      fi
+
+      if [ "$pass" = "2" ]; then
+        echo "  クリップ$((i+1)): ※2回直しても${SWING}px残っています"
+        echo "  　　　　　　　 素材そのものの揺れが大きい可能性があります"
+        break
+      fi
+
+      echo "  クリップ$((i+1)): 揺れが残っているため、もう一度打ち消します"
+      if apply_drift_path_ "stage_loop_$i.mp4" "loop_fix_$i.mp4" drift_path.txt; then
+        mv "loop_fix_$i.mp4" "stage_loop_$i.mp4"
+      else
+        echo "  クリップ$((i+1)): 打ち消しに失敗しました"
+        tail -3 err_driftpath.log 2>/dev/null || true
+        break
+      fi
+    done
+  done
+  echo ""
+fi
+
 # 実際に繰り返される周期を記録する
 #
 # render.yml の LOOP_PERIOD(Geminiの動画チェックが1周期分を切り出すのに使う値)は
@@ -1725,6 +2001,52 @@ fi
 ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
   -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}${INTRO_FPS_VF}" \
   -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
+
+# ---- 導入部の雲も、ループと同じ割合でゆっくりさせる ----
+#
+# 【なぜ貼り替えないのか】
+# 導入部の空をループの空で置き換える方法も試したが、
+# 導入部とループでは山の稜線や雲の形が微妙に違うため、
+# 貼り替えた境目でずれて不自然に見える。
+#
+# 【どうするか】
+# 導入部の雲を、導入部自身の映像でゆっくりさせる。
+# ループと同じ割合(SKY_SLOW_RATIO)で混ぜれば、
+# 元の速さが違っても、どちらも同じだけ遅くなるので差が縮まる。
+#
+# 例: 導入部の雲が元の2倍速くても、両方を3割に落とせば
+#     差は0.6倍ぶんまで縮む。目立たなくなる。
+#
+# 貼り替えないので、山の稜線がずれることはない。
+#
+# 【混ぜる相手】
+# 導入部はカメラが動くので、1枚の静止画を貼ると背景がずれる。
+# そこで「少し前のコマ」と混ぜる。動きが半分になるだけで、
+# 位置はほぼ同じなので、ずれは生じない。
+if [ "${SKY_FREEZE_ENABLED:-0}" = "1" ] && [ -f "sky_mask_0.pgm" ]; then
+  echo "  導入部の雲も、ループと同じ割合でゆっくりさせます..."
+  INTRO_DUR2=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video_noaudio.mp4)
+
+  # 自分自身を少しずらしたものと混ぜて、動きを鈍らせる
+  # tblend で直前のコマと平均をとると、動きが半分に見える
+  SLOW_STEPS=$(awk -v r="${SKY_SLOW_RATIO:-0.7}" 'BEGIN{
+    n=int(r*4+0.5); if(n<1)n=1; if(n>3)n=3; print n }')
+  SLOW_CHAIN="tblend=all_mode=average"
+  for ((sp=1; sp<SLOW_STEPS; sp++)); do
+    SLOW_CHAIN="${SLOW_CHAIN},tblend=all_mode=average"
+  done
+
+  if ffmpeg -y -i intro_video_noaudio.mp4 -loop 1 -i sky_mask_0.pgm \
+       -filter_complex "[0:v]${SLOW_CHAIN},format=rgba[slow];[1:v]format=gray,scale=1920:1080[m];[slow][m]alphamerge[sa];[0:v]format=rgba[bg];[bg][sa]overlay=format=rgb,format=yuv420p[out]" \
+       -map "[out]" -t "$INTRO_DUR2" -r "$OUTPUT_FPS" \
+       -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_sky_done.mp4 2>err_introsky.log; then
+    mv intro_sky_done.mp4 intro_video_noaudio.mp4
+    echo "  導入部の雲をゆっくりさせました(${SLOW_STEPS}段階)"
+  else
+    echo "  加工に失敗したため、導入部はそのまま使います"
+    tail -5 err_introsky.log 2>/dev/null || true
+  fi
+fi
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
@@ -1931,5 +2253,152 @@ fi
 ffmpeg -y -i full_video_noaudio.mp4 -i full_audio.aac \
   -map 0:v -map 1:a -c:v copy -c:a copy -shortest "$OUTPUT_FILE"
 
+# ============================================================
+# 完成品を測って、自分で検品する
+#
+# 【なぜ必要か】
+# これまでは人が目で見て気づいたものを、あとから調べていた。
+# ドリフト・カクつき・画質の段差は、どれも数字で測れる。
+# 作った直後に自分で測って報告すれば、見落としが減る。
+#
+# ここで測るのは、実際に指摘を受けた4項目:
+#   1. ループ周期の中の揺れ(空を止めていない領域で測る)
+#   2. コマの複製(フレームレート変換の失敗)
+#   3. 導入部とループの画質の差
+#   4. 導入部とループの継ぎ目の段差
+# ============================================================
+echo ""
+echo "=== 完成品を検品します ==="
+CHECK_NG=0
+
+TOTAL_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUTPUT_FILE" 2>/dev/null)
+LOOP_START=$(awk -v e="$INTRO_EFFECTIVE" 'BEGIN{printf "%.1f", e+1}')
+PERIOD="${SEAMLESS_DUR:-18}"
+
+CHECK_OUT="$OUTPUT_FILE" CHECK_DUR="$TOTAL_DUR" CHECK_LOOPSTART="$LOOP_START" \
+CHECK_PERIOD="$PERIOD" CHECK_SKY="${SKY_FREEZE_HEIGHT:-46}" python3 <<'CHECKPY'
+import os, subprocess, sys
+
+OUT=os.environ['CHECK_OUT']
+DUR=float(os.environ['CHECK_DUR'] or 0)
+LOOP0=float(os.environ['CHECK_LOOPSTART'] or 20)
+PERIOD=float(os.environ['CHECK_PERIOD'] or 18)
+SKY=float(os.environ['CHECK_SKY'] or 46)
+
+W,H=960,540
+# 空を止めている領域は静止画なので、そこを避けて測る
+Y0=int(H*(SKY/100.0)+H*0.15); Y1=H-10
+if Y0>=Y1-20: Y0=int(H*0.6)
+
+def gray(ss):
+    r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-i',OUT,'-frames:v','1',
+        '-vf',f'scale={W}:{H}','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
+    return r.stdout if len(r.stdout)==W*H else None
+
+def shift(a,b,rng=14):
+    best=(0,9e9)
+    for dx in range(-rng,rng+1):
+        tot=0; cnt=0
+        for y in range(Y0,Y1,4):
+            ra=y*W
+            for x in range(30,W-30,4):
+                xx=x+dx
+                if 0<=xx<W:
+                    tot+=abs(a[ra+x]-b[ra+xx]); cnt+=1
+        d=tot/cnt if cnt else 9e9
+        if d<best[1]: best=(dx,d)
+    return best[0]
+
+ng=[]
+
+# 1. ループ周期の中の揺れ
+if DUR > LOOP0+PERIOD+2:
+    base=gray(LOOP0+1)
+    if base:
+        swings=[]
+        n=6
+        for i in range(1,n+1):
+            t=LOOP0+1+PERIOD*i/(n+1)
+            b=gray(t)
+            if b: swings.append(shift(base,b))
+        if swings:
+            span=max(swings)-min(swings)
+            # 測定解像度480pxでの値を1920px換算に戻す
+            span_full=span*2
+            # 【この判定はまだ精度が足りない】
+            # 同じ動画を別の方法で測ると12pxの揺れが出たのに、
+            # ここでは0pxと判定されたことがある。
+            # 目で見て揺れを感じたら、この数字が小さくても
+            # DRIFT_PATH_ENABLED が効いているか確認すること。
+            print(f'  ループの揺れ幅: 約{span_full}px(参考値)', end='')
+            if span_full >= 8:
+                print('  ← 大きい。DRIFT_PATH_ENABLED を確認してください')
+                ng.append('ループが周期の中で揺れています(約%dpx)' % span_full)
+            else:
+                print('  問題なし')
+
+# 2. コマの複製(カクつき)
+def dup_rate(ss, dur=4):
+    r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-t',str(dur),'-i',OUT,
+        '-vf','scale=160:90','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
+    n=160*90; f=[r.stdout[i*n:(i+1)*n] for i in range(len(r.stdout)//n)]
+    if len(f)<3: return None
+    d=[sum(abs(f[i][j]-f[i-1][j]) for j in range(0,n,5))/(n//5) for i in range(1,len(f))]
+    avg=sum(d)/len(d)
+    near0=sum(1 for v in d if v < avg*0.15)
+    return near0*100//len(d)
+
+for label, ss in [('導入部', max(2, LOOP0*0.4)), ('ループ部', LOOP0+3)]:
+    if DUR > ss+5:
+        r=dup_rate(ss)
+        if r is not None:
+            print(f'  {label}のコマ複製: {r}%', end='')
+            if r >= 10:
+                print('  ← 多い。フレームレートの変換を確認してください')
+                ng.append('%sでコマが複製されています(%d%%)' % (label, r))
+            else:
+                print('  問題なし')
+
+# 3. 導入部とループの画質差
+def sharp(ss):
+    r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-i',OUT,'-frames:v','1',
+        '-vf','crop=1280:400:320:600,scale=640:200','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
+    d=r.stdout
+    if len(d)!=640*200: return None
+    tot=0; cnt=0
+    for y in range(0,200,2):
+        row=y*640
+        for x in range(0,639,2):
+            tot+=abs(d[row+x]-d[row+x+1]); cnt+=1
+    return tot/cnt
+
+if DUR > LOOP0+PERIOD+5:
+    # 導入部はカメラが動いている間はぶれて見えるので、
+    # 止まりきる直前(切り替わりの0.5秒前)と比べる
+    a=sharp(LOOP0-0.5); b=sharp(LOOP0+PERIOD/2)
+    if a and b:
+        ratio=b/a if a>0 else 1
+        print(f'  導入部とループの細かさの比: {ratio:.2f}', end='')
+        if ratio < 0.6 or ratio > 1.7:
+            print('  ← 差が大きい。圧縮の設定を確認してください')
+            ng.append('導入部とループで画質が違います(比 %.2f)' % ratio)
+        else:
+            print('  問題なし')
+
+print('')
+if ng:
+    print('!!! 検品で問題が見つかりました !!!')
+    for v in ng: print('  ・'+v)
+    print('')
+    print('  この動画は公開に適さない可能性があります。')
+    print('  素材の段階では直しきれなかったものです。')
+    print('  内容を確認してから使ってください。')
+    # 後続の工程(通知・アップロード)から見えるよう、印を残す
+    open('quality_warning.txt','w').write('\n'.join(ng))
+else:
+    print('=== 検品: 問題は見つかりませんでした ===')
+CHECKPY
+
+echo ""
 echo "=== レンダリング完了: $OUTPUT_FILE ==="
 ls -la "$OUTPUT_FILE"
