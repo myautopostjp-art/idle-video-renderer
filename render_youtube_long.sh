@@ -138,6 +138,30 @@ if [ "$CLIP_COUNT" -eq 0 ]; then
   exit 1
 fi
 
+# ============================================================
+# 【使っている素材をはっきり記録する】
+#
+# 設定をいくら戻しても結果が変わらない、あるいは戻したはずなのに
+# 違う、という事態が起きた。原因は素材の入れ替わりだったが、
+# ログにURLが出ていなかったため気づくのに時間がかかった。
+#
+# どの素材で作られた動画なのかを、後から必ず追えるようにしておく。
+# ============================================================
+echo ""
+echo "=== この動画に使う素材 ==="
+echo "  導入部  : $INTRO_VIDEO_URL"
+for i in "${!STAGE_CLIP_URLS[@]}"; do
+  echo "  クリップ$((i+1)): ${STAGE_CLIP_URLS[$i]}"
+done
+echo "  BGM     : $BGM_URL"
+if [ -n "$AMBIENT_SOUND_URL" ] && [ "$AMBIENT_SOUND_URL" != "none" ]; then
+  echo "  効果音  : $AMBIENT_SOUND_URL"
+fi
+echo ""
+echo "  ※前回と結果が違うときは、まずここを見比べてください"
+echo "  ※fal.media のURLは一時的なものです。Driveに保存されていない素材です"
+echo ""
+
 echo "ループ用の段階動画クリップをダウンロード中...(${CLIP_COUNT}本)"
 for i in "${!STAGE_CLIP_URLS[@]}"; do
   download_or_die_ "${STAGE_CLIP_URLS[$i]}" "stage_clip_raw_$i.mp4" "クリップ$((i+1))"
@@ -2379,5 +2403,13 @@ else:
 CHECKPY
 
 echo ""
+# 使った素材を記録として残す(完成通知に載せるため)
+{
+  echo "導入部: $INTRO_VIDEO_URL"
+  for i in "${!STAGE_CLIP_URLS[@]}"; do
+    echo "クリップ$((i+1)): ${STAGE_CLIP_URLS[$i]}"
+  done
+} > used_sources.txt
+
 echo "=== レンダリング完了: $OUTPUT_FILE ==="
 ls -la "$OUTPUT_FILE"
