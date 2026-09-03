@@ -1458,22 +1458,21 @@ INTRO_HANDOVER=0
 
 # 導入部とループの境目を溶かす秒数
 #
-# 【0から1に戻した理由】
-# 位置が合っていても、煙や湯気の「動きの勢い」は繋がらない。
-# 導入部の最後で立ちのぼっていた煙が、ループの先頭では
-# 別の動きから始まるため、そこで流れが途切れて見える。
-# 短く溶かせば、その勢いの違いが移り変わりの中に紛れる。
+# 【1から2に増やした理由】
+# 導入部はカメラが動くため空も流れる。ループはカメラ固定なので
+# 空はゆっくりしか動かない。この差は後処理では消せないと分かった。
 #
-# 【以前0にした経緯】
-# 4秒・2秒で試したときは残像が出た。しかしそれは
-# ドリフト補正が効いておらず、重なる2枚の位置がずれていたため。
-# 補正が正しく効くようになった今は、静止した構造物はぴたりと重なり、
-# 動いている煙だけが溶け合う。
+# 消せないなら、切り替わりを緩やかにして紛らわせるしかない。
+# 1秒では短く、速さの変化がそのまま出ていた。
 #
-#   0 … 溶かさない。位置は合うが煙の流れが途切れる
-#   1 … 煙の勢いの違いだけを紛らわせる(現在)
-#   2 … より滑らかだが、残像が出る可能性がある
-XFADE_INTRO=1
+# ドリフト補正が正しく効くようになった今は、静止した構造物が
+# ぴたりと重なるので、2秒に伸ばしても残像が出にくい。
+#
+#   0 … 溶かさない。切り替わりが一瞬で目立つ
+#   1 … 短すぎて速さの変化が出る
+#   2 … 変化が緩やかになる(現在)
+#   3 … さらに緩やかだが、残像が出る可能性
+XFADE_INTRO=2
 
 # 導入部の冒頭から切り落とす秒数
 #
@@ -2002,51 +2001,29 @@ ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
   -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}${INTRO_FPS_VF}" \
   -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
-# ---- 導入部の雲も、ループと同じ割合でゆっくりさせる ----
+# ---- 導入部の空には手を加えない ----
 #
-# 【なぜ貼り替えないのか】
-# 導入部の空をループの空で置き換える方法も試したが、
-# 導入部とループでは山の稜線や雲の形が微妙に違うため、
-# 貼り替えた境目でずれて不自然に見える。
+# 【なぜ加工しないのか — 2つの方法を試して、どちらも失敗した】
 #
-# 【どうするか】
-# 導入部の雲を、導入部自身の映像でゆっくりさせる。
-# ループと同じ割合(SKY_SLOW_RATIO)で混ぜれば、
-# 元の速さが違っても、どちらも同じだけ遅くなるので差が縮まる。
+# ① 導入部の空をループの空で置き換える
+#    → 導入部とループでは山の稜線や雲の形が違うため、
+#      貼り替えた境目がずれて不自然に見えた。
 #
-# 例: 導入部の雲が元の2倍速くても、両方を3割に落とせば
-#     差は0.6倍ぶんまで縮む。目立たなくなる。
+# ② 導入部の雲を混ぜてゆっくりさせる
+#    → 実測すると、必要なのは元の0.09倍。
+#      10段階重ねても0.23倍までしか落ちず、まったく届かなかった。
+#      そのうえ画質だけが落ちた。
 #
-# 貼り替えないので、山の稜線がずれることはない。
+# 【なぜ届かないのか】
+# 導入部で雲が速く見えるのは、カメラが動いているから。
+# カメラが前進すれば、雲も含めて画面全体が流れる。
+# これは映像として自然なことで、後処理では取り除けない。
 #
-# 【混ぜる相手】
-# 導入部はカメラが動くので、1枚の静止画を貼ると背景がずれる。
-# そこで「少し前のコマ」と混ぜる。動きが半分になるだけで、
-# 位置はほぼ同じなので、ずれは生じない。
-if [ "${SKY_FREEZE_ENABLED:-0}" = "1" ] && [ -f "sky_mask_0.pgm" ]; then
-  echo "  導入部の雲も、ループと同じ割合でゆっくりさせます..."
-  INTRO_DUR2=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video_noaudio.mp4)
-
-  # 自分自身を少しずらしたものと混ぜて、動きを鈍らせる
-  # tblend で直前のコマと平均をとると、動きが半分に見える
-  SLOW_STEPS=$(awk -v r="${SKY_SLOW_RATIO:-0.7}" 'BEGIN{
-    n=int(r*4+0.5); if(n<1)n=1; if(n>3)n=3; print n }')
-  SLOW_CHAIN="tblend=all_mode=average"
-  for ((sp=1; sp<SLOW_STEPS; sp++)); do
-    SLOW_CHAIN="${SLOW_CHAIN},tblend=all_mode=average"
-  done
-
-  if ffmpeg -y -i intro_video_noaudio.mp4 -loop 1 -i sky_mask_0.pgm \
-       -filter_complex "[0:v]${SLOW_CHAIN},format=rgba[slow];[1:v]format=gray,scale=1920:1080[m];[slow][m]alphamerge[sa];[0:v]format=rgba[bg];[bg][sa]overlay=format=rgb,format=yuv420p[out]" \
-       -map "[out]" -t "$INTRO_DUR2" -r "$OUTPUT_FPS" \
-       -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_sky_done.mp4 2>err_introsky.log; then
-    mv intro_sky_done.mp4 intro_video_noaudio.mp4
-    echo "  導入部の雲をゆっくりさせました(${SLOW_STEPS}段階)"
-  else
-    echo "  加工に失敗したため、導入部はそのまま使います"
-    tail -5 err_introsky.log 2>/dev/null || true
-  fi
-fi
+# 実際、カメラが動いている間は空も一緒に動くのが普通の見え方であり、
+# 視聴者もそう期待する。無理に止めるほうが不自然になる。
+#
+# 気になるのは切り替わりの瞬間だけなので、
+# そこは XFADE_INTRO で溶かして紛らわせる。
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
