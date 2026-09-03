@@ -1669,8 +1669,27 @@ if [ -n "${INTRO_TRIM:-}" ]; then
   INTRO_CUT="-t $INTRO_KEEP"
   echo "  境目に使った末尾${XFADE_INTRO}秒を導入部から取り除きます(実際に使う導入部: ${INTRO_KEEP}秒)"
 fi
+# 【導入部のフレームレートが違う場合は、中間フレームで揃える】
+#
+# 完成品の導入部を1コマずつ測ったところ、0.2秒ごとに大きく飛んでいた。
+# これは30fpsの映像を25fpsに落とすときに6コマに1枚を捨てた症状。
+# ループクリップは25fpsだが、導入部が30fpsで出てくることがある。
+#
+# 単純に fps= で揃えると捨てるか複製するかしかない。
+# minterpolate なら動きを推測して滑らかに詰め直せる。
+# 同じフレームレートなら何もしない(推測で描くコマが増えるだけなので)。
+INTRO_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 intro_video.mp4 \
+            | awk -F/ '{ if (NF==2 && $2>0) printf "%.4f", $1/$2; else printf "%.4f", $1 }')
+echo "  導入部のフレームレート: ${INTRO_FPS}fps / 出力: ${OUTPUT_FPS}fps"
+if [ -n "$INTRO_FPS" ] && awk -v a="$INTRO_FPS" -v b="$OUTPUT_FPS" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d > 0.01)}'; then
+  echo "  フレームレートが違うため、中間フレームを生成して滑らかに揃えます(数分かかります)"
+  INTRO_FPS_VF="minterpolate=fps=${OUTPUT_FPS}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+else
+  INTRO_FPS_VF="fps=${OUTPUT_FPS}"
+fi
+
 ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
-  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=${OUTPUT_FPS}" \
+  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}${INTRO_FPS_VF}" \
   -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
