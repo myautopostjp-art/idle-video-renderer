@@ -747,6 +747,14 @@ jobs:
           # Geminiによる動画レビュー結果(YouTube長尺のみ。改行は|で連結されている)
           VIDEO_REVIEW='${{ steps.videocheck.outputs.result }}'
 
+          # 使った素材を通知に載せる
+          # (設定を戻しても結果が変わらないとき、素材の入れ替わりに
+          #  すぐ気づけるようにするため)
+          if [ -f used_sources.txt ]; then
+            echo "--- この動画に使われた素材 ---"
+            cat used_sources.txt
+          fi
+
           # レンダリング側の検品で問題が見つかっていれば、それも伝える
           # (完成品を渡す前に気づけるようにするため)
           if [ -f quality_warning.txt ]; then
