@@ -971,7 +971,27 @@ jobs:
       - name: Extract last frame
         id: extract
         run: |
-          curl -L -s -o source.mp4 "${{ github.event.client_payload.video_url }}"
+          # 【読めるようになるまで待ってやり直す】
+          # Driveに保存した直後の動画は、公開設定が外部から見えるように
+          # なるまでに時間差がある。その間にダウンロードすると、
+          # 動画ではなく警告ページのHTMLが返ってくる。
+          # 実際に「moov atom not found」で失敗した。
+          for attempt in 1 2 3 4 5; do
+            curl -L -s -o source.mp4 "${{ github.event.client_payload.video_url }}"
+            if ffprobe -v error -show_entries format=duration -of csv=p=0 source.mp4 >/dev/null 2>&1; then
+              echo "動画を取得できました(${attempt}回目)"
+              break
+            fi
+            SIZE=$(stat -c%s source.mp4 2>/dev/null || echo 0)
+            echo "まだ動画として読めません(${SIZE}バイト)。15秒待ってやり直します(${attempt}/5)"
+            head -c 200 source.mp4 || true
+            echo ""
+            if [ "$attempt" = "5" ]; then
+              echo "5回試しても取得できませんでした"
+              exit 1
+            fi
+            sleep 15
+          done
 
           DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 source.mp4)
           echo "動画の長さ: ${DURATION}秒"
