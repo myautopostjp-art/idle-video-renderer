@@ -125,8 +125,19 @@ jobs:
             exit 0
           fi
 
-          curl -fL -sS --retry 2 -o intro_for_check.mp4 "$INTRO_VIDEO_URL" || {
-            echo "導入部を取得できなかったため、既定のタイミングを使います"; exit 0; }
+          # Driveの公開が反映される前だとHTMLが返るので、読めるまで待ち直す
+          GOT=false
+          for attempt in 1 2 3; do
+            curl -fL -sS --retry 2 -o intro_for_check.mp4 "$INTRO_VIDEO_URL" 2>/dev/null || true
+            if ffprobe -v error -show_entries format=duration -of csv=p=0 intro_for_check.mp4 >/dev/null 2>&1; then
+              GOT=true; break
+            fi
+            echo "導入部がまだ読めません。10秒待ってやり直します(${attempt}/3)"
+            sleep 10
+          done
+          if [ "$GOT" != true ]; then
+            echo "導入部を取得できなかったため、既定のタイミングを使います"; exit 0
+          fi
 
           # 480px・10fpsまで落とす。カメラの位置と湯船の登場を見るには十分で、
           # データ量は数十分の一になる
