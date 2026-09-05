@@ -2070,202 +2070,104 @@ ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
   -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}${INTRO_FPS_VF}" \
   -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
-# ---- 導入部の湯気だけを遅くして、ループに揃える ----
+# ---- 切り替わり直前だけ、空と湯気をループの映像で置き換える ----
 #
-# 【なぜ場所で分けるのか】
-# 映像全体を遅くすると、落ちる湯まで遅くなって不自然になる。
-# しかし湯気は画面の55〜70%の帯にあり、落ちる湯はもっと下(75%以下)にある。
-# 実測したところ、この帯だけを遅くしても落ちる湯はほとんど影響を受けなかった。
+# 【何のためか】
+# 導入部とループはLTXが別々に生成するので、雲の流れる速さも
+# 湯気の勢いも独立に決まる。揃える仕組みがどこにもない。
 #
-# 【実測した効果(導入部の終わり2秒)】
-#            湯気   落ちる湯
-#   加工前   3.34   4.49
-#   0.45倍   1.40   4.39   ← 採用
-#   ループ   1.37   (目標)
+# 同じ映像を使えば、速さは必ず一致する。
+# そこで切り替わりの直前だけ、空と湯気をループの映像に差し替える。
 #
-# 湯気はほぼ完全に一致し、落ちる湯は保たれている。
+# 【なぜ最後の数秒だけか】
+# 導入部はカメラが動くので、貼り付けたループの映像は
+# カメラの動きに追従しない。空だけ取り残されて見える。
+# カメラがほぼ止まっている最後の数秒に限れば、その心配がない。
 #
-#   0    … 何もしない
-#   0.45 … 湯気の帯を遅くする(現在)
-# 【0にした理由 — 実際の映像で破綻した】
-# 短い切り出しでは湯気だけ遅くできたが、カメラが動く実映像では
-# 空と湯気を合わせると画面の7割を占めるため、
-# カメラは動いているのに画面のほとんどが止まる状態になった。
-# 山と空がずれて滑るように見え、映像が破綻した。
+# 【昨日の失敗との違い】
+# 一度この方法を試して「山の稜線がずれる」と失敗した。
+# 原因はマスクが46%まであり、稜線を含んでいたこと。
+# 実測すると雲海の上端は35%なので、そこまでに限れば稜線は入らない。
 #
-# 完成品を測ると、加工が始まる14.7秒で動きが4.45→1.87に落ち、
-# 19.5秒には0.47まで下がっていた。
-INTRO_STEAM_SLOW=0
+#   0   … 置き換えない
+#   2.5 … 最後の2.5秒だけ置き換える(現在)
+INTRO_MATCH_SEC=2.5
 
-# 湯気がある帯(画面上端からの割合 %)
-# ここを外れると落ちる湯や岩まで遅くなるので、狭めに取る
-INTRO_STEAM_TOP=53
-INTRO_STEAM_BOTTOM=72
-INTRO_STEAM_FEATHER=5
+# 置き換える範囲(画面上端からの割合 %)
+# 山の稜線(41〜47%)を避けるため、空は38%まで
+INTRO_MATCH_SKY_BOTTOM=38
+# 湯気の帯。落ちる湯(75%以下)は含めない
+INTRO_MATCH_STEAM_TOP=55
+INTRO_MATCH_STEAM_BOTTOM=72
+INTRO_MATCH_FEATHER=4
 
-if awk "BEGIN{exit !(${INTRO_STEAM_SLOW:-0} > 0.001)}"; then
+if awk "BEGIN{exit !(${INTRO_MATCH_SEC:-0} > 0.1)}" && [ -f "stage_loop_0.mp4" ]; then
   IDUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video_noaudio.mp4)
-  if awk -v d="$IDUR" -v r="${INTRO_SKY_SLOW_SEC:-6}" 'BEGIN{exit !(d > r + 2)}'; then
-    echo "  導入部の終盤で、湯気だけを遅くします(ループに揃えるため)..."
-    ST_SEC="${INTRO_SKY_SLOW_SEC:-6}"
-    ST_HEAD=$(awk -v d="$IDUR" -v r="$ST_SEC" 'BEGIN{printf "%.3f", d - r}')
+  if awk -v d="$IDUR" -v r="$INTRO_MATCH_SEC" 'BEGIN{exit !(d > r + 2)}'; then
+    echo "  切り替わり直前${INTRO_MATCH_SEC}秒の空と湯気を、ループの映像に合わせます..."
+    MT_HEAD=$(awk -v d="$IDUR" -v r="$INTRO_MATCH_SEC" 'BEGIN{printf "%.3f", d - r}')
 
-    # 湯気の帯だけを白くしたマスクを作る
-    python3 - 1920 1080 "$INTRO_STEAM_TOP" "$INTRO_STEAM_BOTTOM" "$INTRO_STEAM_FEATHER" > steam_mask.pgm <<'STEAMPY'
+    # 空と湯気の帯だけを白くしたマスク
+    python3 - 1920 1080 "$INTRO_MATCH_SKY_BOTTOM" "$INTRO_MATCH_STEAM_TOP" \
+      "$INTRO_MATCH_STEAM_BOTTOM" "$INTRO_MATCH_FEATHER" > match_mask.pgm <<'MATCHPY'
 import sys
 w, h = int(sys.argv[1]), int(sys.argv[2])
-top, bottom, fe = float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
+skyb, stt, stb, fe = (float(v) for v in sys.argv[3:7])
 rows = []
 for y in range(h):
     p = y / h * 100
-    if p < top:
-        v = 0
-    elif p < top + fe:
-        v = int(round(255 * (p - top) / fe))
-    elif p < bottom - fe:
-        v = 255
-    elif p < bottom:
-        v = int(round(255 * (bottom - p) / fe))
+    if p < skyb - fe:
+        v = 255                                          # 空
+    elif p < skyb:
+        v = int(round(255 * (skyb - p) / fe))            # 稜線の手前でぼかす
+    elif p < stt:
+        v = 0                                            # 山・建物はそのまま
+    elif p < stt + fe:
+        v = int(round(255 * (p - stt) / fe))
+    elif p < stb - fe:
+        v = 255                                          # 湯気
+    elif p < stb:
+        v = int(round(255 * (stb - p) / fe))
     else:
-        v = 0
+        v = 0                                            # 落ちる湯はそのまま
     rows.append(bytes([v]) * w)
 out = sys.stdout.buffer
 out.write(b'P5\n%d %d\n255\n' % (w, h))
 out.write(b''.join(rows))
-STEAMPY
+MATCHPY
 
-    ST_OK=true
-    ffmpeg -y -i intro_video_noaudio.mp4 -t "$ST_HEAD" -c copy -an steam_head.mp4 2>/dev/null || ST_OK=false
-    if [ "$ST_OK" = true ]; then
-      ffmpeg -y -ss "$ST_HEAD" -i intro_video_noaudio.mp4 -t "$ST_SEC" -an \
-        -c:v libx264 -preset veryfast -crf 16 -pix_fmt yuv420p -r "$OUTPUT_FPS" steam_tail.mp4 2>/dev/null || ST_OK=false
+    MT_OK=true
+    ffmpeg -y -i intro_video_noaudio.mp4 -t "$MT_HEAD" -c copy -an match_head.mp4 2>/dev/null || MT_OK=false
+    if [ "$MT_OK" = true ]; then
+      ffmpeg -y -ss "$MT_HEAD" -i intro_video_noaudio.mp4 -t "$INTRO_MATCH_SEC" -an \
+        -c:v libx264 -preset veryfast -crf 16 -pix_fmt yuv420p -r "$OUTPUT_FPS" match_tail.mp4 2>/dev/null || MT_OK=false
     fi
-    if [ "$ST_OK" = true ]; then
-      ffmpeg -y -i steam_tail.mp4 \
-        -vf "setpts=PTS/${INTRO_STEAM_SLOW},minterpolate=fps=${OUTPUT_FPS}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1" \
-        -t "$ST_SEC" -c:v libx264 -preset veryfast -crf 16 -pix_fmt yuv420p -r "$OUTPUT_FPS" -an steam_slow.mp4 2>err_steamslow.log || ST_OK=false
+    # ループの先頭から同じ長さぶんを用意する(切り替わった先と同じ動き)
+    if [ "$MT_OK" = true ]; then
+      ffmpeg -y -i "stage_loop_0.mp4" -t "$INTRO_MATCH_SEC" -an \
+        -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
+        -c:v libx264 -preset veryfast -crf 16 -pix_fmt yuv420p -r "$OUTPUT_FPS" match_loop.mp4 2>/dev/null || MT_OK=false
     fi
-    if [ "$ST_OK" = true ]; then
-      ffmpeg -y -i steam_tail.mp4 -i steam_slow.mp4 -loop 1 -i steam_mask.pgm \
-        -filter_complex "[1:v]format=rgba[s];[2:v]format=gray,scale=1920:1080[m];[s][m]alphamerge[sa];[0:v]format=rgba[b];[b][sa]overlay=format=rgb,format=yuv420p[o]" \
-        -map "[o]" -t "$ST_SEC" -r "$OUTPUT_FPS" \
-        -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p steam_mixed.mp4 2>>err_steamslow.log || ST_OK=false
+    if [ "$MT_OK" = true ]; then
+      ffmpeg -y -i match_tail.mp4 -i match_loop.mp4 -loop 1 -i match_mask.pgm \
+        -filter_complex "[1:v]format=rgba[l];[2:v]format=gray,scale=1920:1080[m];[l][m]alphamerge[la];[0:v]format=rgba[b];[b][la]overlay=format=rgb,format=yuv420p[o]" \
+        -map "[o]" -t "$INTRO_MATCH_SEC" -r "$OUTPUT_FPS" \
+        -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p match_mixed.mp4 2>err_match.log || MT_OK=false
     fi
-    if [ "$ST_OK" = true ]; then
-      printf "file 'steam_head.mp4'\nfile 'steam_mixed.mp4'\n" > steam_list.txt
-      if ffmpeg -y -f concat -safe 0 -i steam_list.txt -c copy steam_done.mp4 2>/dev/null; then
-        mv steam_done.mp4 intro_video_noaudio.mp4
-        echo "  導入部の湯気を遅くしました(落ちる湯はそのまま)"
+    if [ "$MT_OK" = true ]; then
+      printf "file 'match_head.mp4'\nfile 'match_mixed.mp4'\n" > match_list.txt
+      if ffmpeg -y -f concat -safe 0 -i match_list.txt -c copy match_done.mp4 2>/dev/null; then
+        mv match_done.mp4 intro_video_noaudio.mp4
+        echo "  切り替わり直前の空と湯気を、ループと同じ動きにしました"
       else
         echo "  結合に失敗したため、そのまま使います"
       fi
     else
-      echo "  湯気の加工に失敗したため、そのまま使います"
-      tail -3 err_steamslow.log 2>/dev/null || true
+      echo "  置き換えに失敗したため、そのまま使います"
+      tail -3 err_match.log 2>/dev/null || true
     fi
   fi
 fi
-
-# ---- 導入部の空だけを遅くして、雲をループに揃える ----
-#
-# 【なぜこの方法か】
-# 雲と湯気は画面の別の場所にある。空を分けるマスクがすでにあるので、
-# 空だけを遅くすれば、湯気はそのまま保たれる。
-#
-# 映像全体を減速させると湯気まで遅くなり、雲を揃えると湯気がずれる、
-# という板挟みになっていた。場所で分ければ両立する。
-#
-# 【長さを変えない仕組み】
-# 遅くした映像は長くなるが、その先頭部分だけを使う。
-# 空は「ゆっくり進んだぶん」だけを見せ、地上は元のまま流れる。
-# 長さが変わらないので、音のタイミングもずれない。
-#
-# 【実測した効果(導入部の終わり2秒)】
-#            雲     湯気
-#   加工前   4.82   2.90
-#   0.25倍   2.08   2.84
-#   0.10倍   0.91   2.84
-#   0.06倍   0.72   2.84   ← 採用
-#   ループ   0.52   1.37   (目標)
-#
-# 雲は目標に近づき、湯気はまったく落ちていない。
-#
-#   0    … 何もしない
-#   0.06 … 空を大きく遅くする(現在)
-# 【0にした理由 — 上と同じ理由で破綻した】
-# カメラが動いている間に空だけを止めると、
-# 空と山の稜線がずれて滑って見える。
-INTRO_SKY_SLOW=0
-
-# 空を遅くする区間(導入部の終わりから何秒ぶん)
-# 全編にかけると、カメラの動きに対して空だけが遅れて見える。
-# 切り替わりの直前だけにとどめる。
-INTRO_SKY_SLOW_SEC=6
-
-if awk "BEGIN{exit !(${INTRO_SKY_SLOW:-0} > 0.001)}" && [ -f "sky_mask_0.pgm" ]; then
-  IDUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video_noaudio.mp4)
-  if awk -v d="$IDUR" -v r="$INTRO_SKY_SLOW_SEC" 'BEGIN{exit !(d > r + 2)}'; then
-    echo "  導入部の終盤${INTRO_SKY_SLOW_SEC}秒で、空だけを遅くします(雲をループに揃えるため)..."
-    HEAD_LEN=$(awk -v d="$IDUR" -v r="$INTRO_SKY_SLOW_SEC" 'BEGIN{printf "%.3f", d - r}')
-
-    SKY_OK=true
-    # 前半はそのまま
-    ffmpeg -y -i intro_video_noaudio.mp4 -t "$HEAD_LEN" -c copy -an sky_head.mp4 2>/dev/null || SKY_OK=false
-
-    # 後半: 空だけを遅くしたものを重ねる
-    if [ "$SKY_OK" = true ]; then
-      ffmpeg -y -ss "$HEAD_LEN" -i intro_video_noaudio.mp4 -t "$INTRO_SKY_SLOW_SEC" -an \
-        -c:v libx264 -preset veryfast -crf 16 -pix_fmt yuv420p -r "$OUTPUT_FPS" sky_tail.mp4 2>/dev/null || SKY_OK=false
-    fi
-    if [ "$SKY_OK" = true ]; then
-      ffmpeg -y -i sky_tail.mp4 \
-        -vf "setpts=PTS/${INTRO_SKY_SLOW},minterpolate=fps=${OUTPUT_FPS}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1" \
-        -t "$INTRO_SKY_SLOW_SEC" -c:v libx264 -preset veryfast -crf 16 -pix_fmt yuv420p -r "$OUTPUT_FPS" -an sky_slow.mp4 2>err_skyslow.log || SKY_OK=false
-    fi
-    if [ "$SKY_OK" = true ]; then
-      ffmpeg -y -i sky_tail.mp4 -i sky_slow.mp4 -loop 1 -i sky_mask_0.pgm \
-        -filter_complex "[1:v]format=rgba[sky];[2:v]format=gray,scale=1920:1080[m];[sky][m]alphamerge[sa];[0:v]format=rgba[bg];[bg][sa]overlay=format=rgb,format=yuv420p[out]" \
-        -map "[out]" -t "$INTRO_SKY_SLOW_SEC" -r "$OUTPUT_FPS" \
-        -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p sky_mixed.mp4 2>>err_skyslow.log || SKY_OK=false
-    fi
-    if [ "$SKY_OK" = true ]; then
-      printf "file 'sky_head.mp4'\nfile 'sky_mixed.mp4'\n" > sky_list.txt
-      if ffmpeg -y -f concat -safe 0 -i sky_list.txt -c copy sky_done.mp4 2>/dev/null; then
-        mv sky_done.mp4 intro_video_noaudio.mp4
-        echo "  導入部の空を遅くしました(湯気はそのまま)"
-      else
-        echo "  結合に失敗したため、導入部はそのまま使います"
-      fi
-    else
-      echo "  加工に失敗したため、導入部はそのまま使います"
-      tail -3 err_skyslow.log 2>/dev/null || true
-    fi
-  fi
-fi
-
-# ---- 導入部の空には手を加えない ----
-#
-# 【なぜ加工しないのか — 2つの方法を試して、どちらも失敗した】
-#
-# ① 導入部の空をループの空で置き換える
-#    → 導入部とループでは山の稜線や雲の形が違うため、
-#      貼り替えた境目がずれて不自然に見えた。
-#
-# ② 導入部の雲を混ぜてゆっくりさせる
-#    → 実測すると、必要なのは元の0.09倍。
-#      10段階重ねても0.23倍までしか落ちず、まったく届かなかった。
-#      そのうえ画質だけが落ちた。
-#
-# 【なぜ届かないのか】
-# 導入部で雲が速く見えるのは、カメラが動いているから。
-# カメラが前進すれば、雲も含めて画面全体が流れる。
-# これは映像として自然なことで、後処理では取り除けない。
-#
-# 実際、カメラが動いている間は空も一緒に動くのが普通の見え方であり、
-# 視聴者もそう期待する。無理に止めるほうが不自然になる。
-#
-# 気になるのは切り替わりの瞬間だけなので、
-# そこは XFADE_INTRO で溶かして紛らわせる。
 
 echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
