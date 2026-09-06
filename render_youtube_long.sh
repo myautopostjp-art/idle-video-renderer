@@ -2641,7 +2641,42 @@ if DUR > LOOP0+PERIOD+2:
             else:
                 print('  問題なし')
 
-# 2. コマの複製(カクつき)
+# 2. 雲の速さが導入部とループで揃っているか
+#
+# 【測り方 — 一度失敗している】
+# 画面全体の変化量で測ったところ「ほぼ同じ」と出たが、
+# 実際には導入部のほうが明らかに速かった。
+# 測る範囲に岩や木が混ざり、雲の動きが埋もれていたため。
+#
+# 雲海だけを切り出して測ると、はっきり差が出た:
+#   導入部 平均10.05 / ループ 平均4.13 → 2.4倍
+#
+# 導入部はカメラが前進するので、雲が押し流されるように動く。
+# カメラの速さをプロンプトで落とすしかない。
+def cloudmove(ss, dt=0.5):
+    def grab(t):
+        r=subprocess.run(['ffmpeg','-v','error','-ss',str(t),'-i',OUT,'-frames:v','1',
+            '-vf','crop=iw*0.39:ih*0.074:iw*0.13:ih*0.444,scale=375:40',
+            '-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
+        return r.stdout if len(r.stdout)==375*40 else None
+    a=grab(ss); b=grab(ss+dt)
+    if not a or not b: return None
+    return sum(abs(a[i]-b[i]) for i in range(0,len(a),3))/(len(a)//3)
+
+if DUR > LOOP0+30:
+    iv=[v for v in (cloudmove(LOOP0-5), cloudmove(LOOP0-3), cloudmove(LOOP0-1)) if v]
+    lv=[v for v in (cloudmove(LOOP0+8), cloudmove(LOOP0+16), cloudmove(LOOP0+24)) if v]
+    if iv and lv:
+        ia=sum(iv)/len(iv); la=sum(lv)/len(lv)
+        ratio=ia/la if la>0.01 else 1
+        print(f'  雲の速さ: 導入部{ia:.1f} / ループ{la:.1f} → 導入部は{ratio:.1f}倍', end='')
+        if ratio >= 1.8:
+            print('  ← 導入部が速すぎます')
+            ng.append('導入部の雲がループより%.1f倍速く流れています(カメラの前進が速い)' % ratio)
+        else:
+            print('  問題なし')
+
+# 3. コマの複製(カクつき)
 def dup_rate(ss, dur=4):
     r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-t',str(dur),'-i',OUT,
         '-vf','scale=160:90','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
@@ -2663,7 +2698,7 @@ for label, ss in [('導入部', max(2, LOOP0*0.4)), ('ループ部', LOOP0+3)]:
             else:
                 print('  問題なし')
 
-# 3. 導入部とループの画質差
+# 4. 導入部とループの画質差
 def sharp(ss):
     r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-i',OUT,'-frames:v','1',
         '-vf','crop=1280:400:320:600,scale=640:200','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
