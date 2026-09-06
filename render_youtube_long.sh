@@ -43,6 +43,24 @@ echo "particleKey: ${PARTICLE_KEY:-未指定}"
 #
 #   14 … ほぼ原画のまま。数十秒のクリップなので容量も時間も問題にならない
 #   23 … 完成品の設定。ここを途中段階にも使うと劣化が重なる
+# ---- BGMの音量を均す ----
+#
+# 【なぜ必要か】
+# Lyria3が生成する曲には、途中で音が引く箇所がある。
+# 完成品を測ると、150秒付近だけ15dB下がっていた:
+#   145秒 -24.8 / 150秒 -34.9 / 165秒 -25.4
+# 1時間流し続ける睡眠用BGMで、急に静かになるのは望ましくない。
+#
+# 【設定の根拠(実測)】
+#   加工なし                     谷の深さ 10.0dB
+#   threshold=-28 ratio=3        谷の深さ  6.2dB
+#   threshold=-32 ratio=5        谷の深さ  3.5dB
+#   threshold=-36 ratio=8        谷の深さ  2.3dB  ← 採用
+#
+# attack/releaseを長めにするのは、音楽の抑揚まで潰さないため。
+# 短くすると音が不自然に張り付く。
+BGM_LEVELER="acompressor=threshold=-36dB:ratio=8:attack=400:release=2500:makeup=7"
+
 # ---- 暗すぎる素材を持ち上げる設定 ----
 #
 # LTXは生成のたびに明るさが大きく振れる。
@@ -1663,16 +1681,24 @@ INTRO_HANDOVER=0
 
 # 導入部とループの境目を溶かす秒数
 #
-# 【makeIntroToLoop を使った場合は0でよい】
-# ループの先頭フレームを終点に指定して導入部を作ると、
-# 導入部の最後とループの先頭が同じ絵になる。
-# 溶かす必要がなく、むしろ同じ絵を重ねるぶん一瞬止まって見える。
+# 【0から0.8に戻した理由】
+# 終点をループの先頭に指定して導入部を作ったので、絵は似ている。
+# そこで溶かす処理を切ったが、完成品を1コマずつ測ると
+# 継ぎ目で画が大きく飛んでいた。
 #
-# 従来のやり方(導入部→最終フレーム→ループ)のときは1にする。
+#   18.74秒: 変化15.96 (平均1.23の13倍)
 #
-#   0 … 終点を合わせて作った導入部のとき(現在)
-#   1 … 従来のやり方のとき
-XFADE_INTRO=0
+# 終点を指定しても、LTXが生成した最後のコマと
+# ループの先頭のコマは完全には一致しない。
+# その差が1コマで切り替わるため、飛んで見える。
+#
+# 絵が似ているぶん、短く溶かすだけで十分に紛れる。
+# 長くすると同じ絵が重なって一瞬止まって見えるので0.8秒。
+#
+#   0   … 溶かさない。1コマで飛ぶ
+#   0.8 … 差を紛らわせる(現在)
+#   2   … 長すぎ。同じ絵が重なって止まって見える
+XFADE_INTRO=0.8
 
 # 導入部の冒頭から切り落とす秒数
 #
@@ -2225,8 +2251,63 @@ INTRO_BRIGHT=$(ffmpeg -v error -ss 2 -i intro_video.mp4 -frames:v 1 \
   | python3 -c "import sys; d=sys.stdin.buffer.read(); print(int(sum(d)/len(d)) if d else 128)")
 [ -z "$INTRO_BRIGHT" ] && INTRO_BRIGHT=128
 
+# ---- 導入部の明るさを、ループに合わせる ----
+#
+# 【なぜ必要か】
+# 完成品を測ると、切り替わりで見え方が変わっていた:
+#   導入部18秒  明るさ74.8 コントラスト31.7
+#   ループ      明るさ64.3 コントラスト35.0
+# ループのほうが暗くて締まっている。切り替わった瞬間に
+# 「雰囲気が変わる」と感じられる原因がこれ。
+#
+# 導入部は室内から外へ出るにつれて明るくなる。
+# 自然な変化だが、上がりすぎてループを追い越していた。
+#
+# 【どう合わせるか】
+# 一律に持ち上げるのではなく、ループの明るさを基準にして
+# 導入部をそこへ寄せる。明るすぎれば下げ、暗すぎれば上げる。
+#
+# 合わせるのは導入部の「終わりのほう」の明るさ。
+# 切り替わる直前が揃っていれば、段差を感じない。
+
+# ループの明るさを測る(これが目標値)
+LOOP_TARGET=$(ffmpeg -v error -ss 3 -i "stage_clip_raw_0.mp4" -frames:v 1 \
+  -vf "scale=160:90" -pix_fmt gray -f rawvideo - 2>/dev/null \
+  | python3 -c "import sys; d=sys.stdin.buffer.read(); print(int(sum(d)/len(d)) if d else 0)")
+
+# 導入部の終わりのほうの明るさを測る
+INTRO_END=$(awk -v d="$INTRO_DURATION" 'BEGIN{v=d-2; if(v<1)v=1; print v}')
+INTRO_TAILBRIGHT=$(ffmpeg -v error -ss "$INTRO_END" -i intro_video.mp4 -frames:v 1 \
+  -vf "scale=160:90" -pix_fmt gray -f rawvideo - 2>/dev/null \
+  | python3 -c "import sys; d=sys.stdin.buffer.read(); print(int(sum(d)/len(d)) if d else 0)")
+
 INTRO_LIFT_VF=""
-if [ "$INTRO_BRIGHT" -lt "$INTRO_DARK_THRESHOLD" ] 2>/dev/null; then
+if [ "${LOOP_TARGET:-0}" -gt 10 ] && [ "${INTRO_TAILBRIGHT:-0}" -gt 10 ] 2>/dev/null; then
+  DIFF=$(( INTRO_TAILBRIGHT - LOOP_TARGET ))
+  ABSDIFF=${DIFF#-}
+  echo "  明るさ: 導入部の終わり${INTRO_TAILBRIGHT} / ループ${LOOP_TARGET} (差${DIFF})"
+  if [ "$ABSDIFF" -ge 6 ]; then
+    # 0〜255の差を、eqのbrightness(-1〜1)に直す
+    #
+    # 【係数0.55の根拠】
+    # 単純に差÷255で計算すると効きすぎた。
+    # 明るさ76の素材を65に合わせたい場合の実測:
+    #   係数1.00 → 59 (下げすぎ)
+    #   係数0.55 → 65 (一致)
+    #   係数0.40 → 69 (不足)
+    # eqのbrightnessは線形に効かないため、補正が必要。
+    ADJ=$(awk -v d="$DIFF" 'BEGIN{printf "%.4f", -d*0.55/255.0}')
+    INTRO_LIFT_VF="eq=brightness=${ADJ},"
+    if [ "$DIFF" -gt 0 ]; then
+      echo "  導入部が明るすぎるため、ループに合わせて下げます"
+    else
+      echo "  導入部が暗いため、ループに合わせて上げます"
+    fi
+  else
+    echo "  明るさは揃っています(補正なし)"
+  fi
+elif [ "$INTRO_BRIGHT" -lt "$INTRO_DARK_THRESHOLD" ] 2>/dev/null; then
+  # ループの明るさを測れなかったときは、従来どおり暗ければ持ち上げる
   INTRO_LIFT_VF="${INTRO_LIFT},"
   echo "  導入部が暗いため($INTRO_BRIGHT)、暗部を持ち上げます"
 else
@@ -2465,12 +2546,12 @@ if [ "$HAS_AMBIENT" = true ]; then
 
   # 室内で聴こえている状態(こもって、響いて、控えめ)
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
-    -af "${BGM_EQ},lowpass=f=${BGM_INDOOR_LOWPASS},aecho=0.8:0.9:180:0.4,volume=${BGM_INDOOR_VOLUME}" \
+    -af "${BGM_LEVELER},${BGM_EQ},lowpass=f=${BGM_INDOOR_LOWPASS},aecho=0.8:0.9:180:0.4,volume=${BGM_INDOOR_VOLUME}" \
     -c:a pcm_s16le bgm_indoor.wav
 
   # 屋外に出た状態(開けて、通常音量)
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
-    -af "${BGM_EQ},volume=0.8" \
+    -af "${BGM_LEVELER},${BGM_EQ},volume=0.8" \
     -c:a pcm_s16le bgm_outdoor.wav
 
   # 導入部をかけて室内の響きから屋外の響きへ入れ替える
@@ -2485,7 +2566,7 @@ if [ "$HAS_AMBIENT" = true ]; then
     echo "空間変化の適用に失敗したため、従来のフェードインで処理します"
     tail -3 err_bgmspace.log || true
     ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
-      -af "${BGM_EQ},afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},volume=0.8" \
+      -af "${BGM_LEVELER},${BGM_EQ},afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},volume=0.8" \
       -c:a pcm_s16le bgm_full.wav
   fi
 
@@ -2676,7 +2757,67 @@ if DUR > LOOP0+30:
         else:
             print('  問題なし')
 
-# 3. コマの複製(カクつき)
+# 3. 導入部とループの明るさが揃っているか
+#
+# 切り替わりで「雰囲気が変わる」と指摘された原因がこれだった。
+#   導入部18秒 明るさ74.8 / ループ 明るさ64.3
+# 10も差があると、切り替わった瞬間に見え方が変わる。
+def brightness(ss):
+    r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-i',OUT,'-frames:v','1',
+        '-vf','scale=160:90','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
+    d=r.stdout
+    return sum(d)/len(d) if d else None
+
+if DUR > LOOP0+20:
+    ib=brightness(LOOP0-1)
+    lb=brightness(LOOP0+10)
+    if ib and lb:
+        gap=abs(ib-lb)
+        print(f'  明るさ: 導入部の終わり{ib:.0f} / ループ{lb:.0f} (差{gap:.0f})', end='')
+        if gap >= 8:
+            print('  ← 切り替わりで雰囲気が変わります')
+            ng.append('導入部とループで明るさが%.0f違います' % gap)
+        else:
+            print('  問題なし')
+
+# 4. 音量が急に変わる箇所がないか
+#
+# Lyria3の曲には途中で音が引く箇所がある。
+# 完成品を測ると150秒付近だけ15dB下がっていた。
+# 1時間流し続ける動画で、急に静かになるのは望ましくない。
+def loudness(ss):
+    r=subprocess.run(['ffmpeg','-ss',str(ss),'-t','4','-i',OUT,
+        '-af','volumedetect','-f','null','-'],capture_output=True)
+    for line in r.stderr.decode(errors='ignore').split('\n'):
+        if 'mean_volume:' in line:
+            try: return float(line.split('mean_volume:')[1].replace('dB','').strip())
+            except: return None
+    return None
+
+if DUR > 120:
+    pts=[]
+    t=LOOP0+5
+    while t < DUR-6:
+        v=loudness(t)
+        if v is not None: pts.append((t,v))
+        # 【間隔を細かくした理由】
+        # 7点だけ測ったところ、実際にあった10dBの谷を
+        # 飛ばして4.4dBと報告していた。
+        # 音量の落ち込みは20秒ほどの幅しかないことがあるので、
+        # 15秒間隔で測る。
+        t += 15
+    if len(pts) >= 4:
+        vals=[v for _,v in pts]
+        gap=max(vals)-min(vals)
+        lo=min(pts, key=lambda x:x[1])
+        print(f'  音量の振れ幅: {gap:.1f}dB (最も静かなのは{lo[0]:.0f}秒付近)', end='')
+        if gap >= 8:
+            print('  ← 急に静かになる箇所があります')
+            ng.append('音量が%.0fdB変動します(%.0f秒付近が静かすぎ)' % (gap, lo[0]))
+        else:
+            print('  問題なし')
+
+# 5. コマの複製(カクつき)
 def dup_rate(ss, dur=4):
     r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-t',str(dur),'-i',OUT,
         '-vf','scale=160:90','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
@@ -2698,7 +2839,7 @@ for label, ss in [('導入部', max(2, LOOP0*0.4)), ('ループ部', LOOP0+3)]:
             else:
                 print('  問題なし')
 
-# 4. 導入部とループの画質差
+# 6. 導入部とループの画質差
 def sharp(ss):
     r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-i',OUT,'-frames:v','1',
         '-vf','crop=1280:400:320:600,scale=640:200','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
