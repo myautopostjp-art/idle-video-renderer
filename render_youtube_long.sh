@@ -43,6 +43,74 @@ echo "particleKey: ${PARTICLE_KEY:-未指定}"
 #
 #   14 … ほぼ原画のまま。数十秒のクリップなので容量も時間も問題にならない
 #   23 … 完成品の設定。ここを途中段階にも使うと劣化が重なる
+# ---- 暗すぎる素材を持ち上げる設定 ----
+#
+# LTXは生成のたびに明るさが大きく振れる。
+# 高評価だった版と最新版を比べると:
+#   明るさ 92.2 → 47.3(半分)
+#   真っ黒に近い部分 6.6% → 29.0%(4.4倍)
+# 室内が黒く潰れて、内装がほとんど見えない状態だった。
+#
+# 常に持ち上げると明るい素材で白飛びするので、
+# 実際に測って暗いときだけ補正する。
+# curves を使うのは暗部だけを持ち上げ、星や行灯を変えないため。
+INTRO_DARK_THRESHOLD=60
+INTRO_LIFT="curves=all=0/0.06 0.5/0.55 1/1"
+
+# ---- 眠い素材のときだけ輪郭を起こす ----
+#
+# 【なぜ必要か】
+# LTXは生成のたびに解像感が振れる。高評価だった版と比べると
+# 完成品の細かさが 1.60 → 0.94 と4割落ちていた。
+#
+# 圧縮の問題ではない。最新版のほうがビットレートは4割高いのに
+# 細かさは低かった(2.72Mbps/1.60 対 3.80Mbps/0.94)。
+# 素材そのものが眠い。
+#
+# 【なぜ自動判定か】
+# 常にかけると、くっきり生成されたときに輪郭が硬くなり、
+# 湯気や雲のような柔らかいものが不自然になる。
+#
+# 【効果(実測)】
+#   加工なし        0.94
+#   unsharp=3:3:0.8 1.12
+#   unsharp=5:5:1.2 1.51  ← 採用。高評価版の1.60にほぼ届く
+#   unsharp=5:5:2.0 1.82  かけすぎ
+# この関数で測った実際の値:
+#   高評価版の素材       4.01
+#   高評価版の完成品     3.38
+#   最新の完成品         1.56  ← 眠い
+# 2.5を下回ったら補正する
+SHARPEN_THRESHOLD=2.5
+# 【強さの実測(細かさ2.02の素材で)】
+#   5:5:1.2 → 2.23
+#   5:5:1.8 → 2.32
+#   7:7:2.0 → 2.52  ← 採用
+#   7:7:2.5 → 2.68  これ以上は輪郭が硬くなり、
+#                    湯気や雲のような柔らかいものが不自然になる
+#
+# 高評価版の3.38には届かないが、素材にない細部は作れない。
+# 「かけすぎて別の不自然さを生む」より手前で止める。
+SHARPEN_FILTER="unsharp=7:7:2.0"
+
+# 素材の細かさを測る(隣り合う画素の差の平均)
+measure_detail_() {
+  ffmpeg -v error -ss "${2:-1}" -i "$1" -frames:v 1 \
+    -vf "crop=iw*0.6:ih*0.3:iw*0.2:ih*0.55,scale=320:100" -pix_fmt gray -f rawvideo - 2>/dev/null \
+  | python3 -c "
+import sys
+d=sys.stdin.buffer.read()
+W,H=320,100
+if len(d)<W*H: print('99'); raise SystemExit
+t=0; n=0
+for y in range(H):
+    r=y*W
+    for x in range(W-1):
+        t+=abs(d[r+x]-d[r+x+1]); n+=1
+print('%.2f' % (t/n if n else 99))
+"
+}
+
 # ---- 完成品の画質 ----
 #
 # ここは1時間ぶんの容量に直結するので、中間ファイルとは別に持つ。
@@ -1103,6 +1171,48 @@ fi
 # 速度1.0のまま中間フレームを作っても、結果は元と変わらない。
 # それどころか推測で描いたコマに置き換わるぶん、わずかに眠くなる。
 # 20秒のクリップに数分かかる処理なので、飛ばせるなら飛ばす。
+# ---- ループクリップも暗すぎるときは持ち上げる ----
+#
+# 導入部と同じ理由。生成のたびに明るさが振れるため、
+# 暗く出たときだけ暗部を持ち上げる。
+# 導入部と同じ補正をかけるので、明るさの段差も生じない。
+LOOP_BRIGHT=$(ffmpeg -v error -ss 1 -i "stage_clip_raw_0.mp4" -frames:v 1 \
+  -vf "scale=160:90" -pix_fmt gray -f rawvideo - 2>/dev/null \
+  | python3 -c "import sys; d=sys.stdin.buffer.read(); print(int(sum(d)/len(d)) if d else 128)")
+[ -z "$LOOP_BRIGHT" ] && LOOP_BRIGHT=128
+
+if [ "$LOOP_BRIGHT" -lt "${INTRO_DARK_THRESHOLD:-60}" ] 2>/dev/null; then
+  echo "ループクリップが暗いため($LOOP_BRIGHT)、暗部を持ち上げます"
+  for ((i=0; i<CLIP_COUNT; i++)); do
+    if ffmpeg -y -i "stage_clip_raw_$i.mp4" -an \
+         -vf "${INTRO_LIFT:-curves=all=0/0.06 0.5/0.55 1/1}" \
+         -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r "$OUTPUT_FPS" \
+         "lift_$i.mp4" 2>/dev/null; then
+      mv "lift_$i.mp4" "stage_clip_raw_$i.mp4"
+    fi
+  done
+else
+  echo "ループクリップの明るさ: $LOOP_BRIGHT (補正なし)"
+fi
+
+# ---- 眠いときだけ輪郭を起こす ----
+LOOP_DETAIL=$(measure_detail_ "stage_clip_raw_0.mp4" 1)
+if awk -v d="$LOOP_DETAIL" -v t="${SHARPEN_THRESHOLD:-1.30}" 'BEGIN{exit !(d < t)}'; then
+  echo "ループクリップが眠いため(細かさ ${LOOP_DETAIL})、輪郭を起こします"
+  for ((i=0; i<CLIP_COUNT; i++)); do
+    if ffmpeg -y -i "stage_clip_raw_$i.mp4" -an \
+         -vf "${SHARPEN_FILTER}" \
+         -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" -pix_fmt yuv420p -r "$OUTPUT_FPS" \
+         "sharp_$i.mp4" 2>/dev/null; then
+      mv "sharp_$i.mp4" "stage_clip_raw_$i.mp4"
+    fi
+  done
+  AFTER=$(measure_detail_ "stage_clip_raw_0.mp4" 1)
+  echo "  細かさ ${LOOP_DETAIL} → ${AFTER}"
+else
+  echo "ループクリップの細かさ: $LOOP_DETAIL (輪郭の補正なし)"
+fi
+
 SKIP_SLOWDOWN=false
 if awk -v s="$LOOP_SPEED" 'BEGIN{exit !(s > 0.99 && s < 1.01)}'; then
   CLIP_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "stage_clip_raw_0.mp4" 2>/dev/null \
@@ -1208,7 +1318,13 @@ except Exception:
 #   4秒 … さらに滑らかになるが、ループ周期がその分短くなる
 #
 # ※重ねた秒数だけループ周期は短くなる(15.3秒 − この値)
-XFADE_LOOP=2
+# 【2から3に伸ばした理由】
+# 完成品でループの継ぎ目を測ると、周期の最後と最初のコマの差が
+# 高評価版3.70に対して最新は9.99あった(2.7倍)。
+# 素材そのものの差なので消せないが、溶かす時間を伸ばせば紛れる。
+#
+# 伸ばしすぎると残像が出るので3秒まで。
+XFADE_LOOP=3
 
 # ---- ①-2c 空を止める ----
 #
@@ -1378,14 +1494,25 @@ if ystar > y1:
     ystar = y1
 cloud = int(round(255 * ratio))   # 雲海の帯で静止画をどれだけ混ぜるか
 
+# 【星の下端にもぼかしを入れる】
+# 星は255(完全固定)、その下は cloud の値。
+# SKY_SLOW_RATIO=0 のとき cloud=0 になるため、
+# 255 から 0 へ一気に落ちて境目に横線が出る。
+#
+# 実際、完成品の高さ323px(=星の境界)で行間の差が37.9あった。
+# 平均2.51の15倍で、はっきり線として見えていた。
+star_fe = fe
 rows = []
 for y in range(h):
-    if y < ystar:
+    if y < ystar - star_fe:
         v = 255                                    # 星: 完全に静止画
+    elif y < ystar:
+        # 星の下端をぼかして、雲海の値へなめらかに落とす
+        t = (y - (ystar - star_fe)) / star_fe
+        v = int(round(255 * (1 - t) + cloud * t))
     elif y < y1:
-        v = cloud                                  # 雲海: 部分的に混ぜてゆっくり流す
+        v = cloud                                  # 雲海
     elif y < y1 + fe:
-        # 雲海の混ぜ具合から、徐々に素の映像へ戻す
         v = int(round(cloud * (1 - (y - y1) / fe)))
     else:
         v = 0                                      # 完全に映像
@@ -1536,14 +1663,16 @@ INTRO_HANDOVER=0
 
 # 導入部とループの境目を溶かす秒数
 #
-# 【1に戻した理由】
-# 2秒に伸ばしたが改善せず、かくかくの印象が強くなった。
-# 高評価だった状態は1秒だったので、そこに戻す。
+# 【makeIntroToLoop を使った場合は0でよい】
+# ループの先頭フレームを終点に指定して導入部を作ると、
+# 導入部の最後とループの先頭が同じ絵になる。
+# 溶かす必要がなく、むしろ同じ絵を重ねるぶん一瞬止まって見える。
 #
-#   0 … 溶かさない
-#   1 … 高評価だった値(現在)
-#   2 … 伸ばしたが改善しなかった
-XFADE_INTRO=1
+# 従来のやり方(導入部→最終フレーム→ループ)のときは1にする。
+#
+#   0 … 終点を合わせて作った導入部のとき(現在)
+#   1 … 従来のやり方のとき
+XFADE_INTRO=0
 
 # 導入部の冒頭から切り落とす秒数
 #
@@ -2075,8 +2204,46 @@ else
   INTRO_FPS_VF="fps=${OUTPUT_FPS}"
 fi
 
+# ---- 導入部が暗すぎるときだけ持ち上げる ----
+#
+# 【なぜ必要か】
+# LTXは生成のたびに明るさが大きく振れる。
+# 高評価だった版と最新版を比べると:
+#   明るさ 92.2 → 47.3(半分)
+#   真っ黒に近い部分 6.6% → 29.0%(4.4倍)
+# 室内が黒く潰れて、内装がほとんど見えない状態だった。
+#
+# 【なぜ自動判定か】
+# 常に持ち上げると、明るく生成されたときに白飛びする。
+# 実際に測って、暗いときだけ補正する。
+#
+# curves を使うのは、暗部だけを持ち上げて
+# 明るい部分(星や行灯)は変えないため。
+# 単純な brightness だと全体が白っぽくなる。
+INTRO_BRIGHT=$(ffmpeg -v error -ss 2 -i intro_video.mp4 -frames:v 1 \
+  -vf "scale=160:90" -pix_fmt gray -f rawvideo - 2>/dev/null \
+  | python3 -c "import sys; d=sys.stdin.buffer.read(); print(int(sum(d)/len(d)) if d else 128)")
+[ -z "$INTRO_BRIGHT" ] && INTRO_BRIGHT=128
+
+INTRO_LIFT_VF=""
+if [ "$INTRO_BRIGHT" -lt "$INTRO_DARK_THRESHOLD" ] 2>/dev/null; then
+  INTRO_LIFT_VF="${INTRO_LIFT},"
+  echo "  導入部が暗いため($INTRO_BRIGHT)、暗部を持ち上げます"
+else
+  echo "  導入部の明るさ: $INTRO_BRIGHT (補正なし)"
+fi
+
+# 導入部も眠ければ輪郭を起こす(ループと揃えるため同じ判定を使う)
+INTRO_DETAIL=$(measure_detail_ intro_video.mp4 3)
+if awk -v d="$INTRO_DETAIL" -v t="${SHARPEN_THRESHOLD:-1.30}" 'BEGIN{exit !(d < t)}'; then
+  INTRO_LIFT_VF="${INTRO_LIFT_VF}${SHARPEN_FILTER},"
+  echo "  導入部が眠いため(細かさ ${INTRO_DETAIL})、輪郭を起こします"
+else
+  echo "  導入部の細かさ: $INTRO_DETAIL (輪郭の補正なし)"
+fi
+
 ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
-  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}${INTRO_FPS_VF}" \
+  -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_LIFT_VF}${INTRO_ZOOM_VF}${INTRO_FPS_VF}" \
   -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
 # ---- 切り替わり直前だけ、空と湯気をループの映像で置き換える ----
