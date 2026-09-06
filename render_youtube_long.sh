@@ -2817,7 +2817,57 @@ if DUR > 120:
         else:
             print('  問題なし')
 
-# 5. コマの複製(カクつき)
+# 5. カメラが後退していないか
+#
+# 【なぜ必要か】
+# プロンプトに「後退しない」と明記しても、LTXが守らないことがある。
+# 実際、前半9秒を後退してから前進する動画ができた。
+#
+# 【測り方 — 一度失敗している】
+# 0.6秒間隔で測ったところ、全区間0.99と出て判定できなかった。
+# 間隔が短く、拡大率の差が現れないため。
+# 0.8秒間隔で、拡大率を0.94〜1.12の範囲で探すと正しく出る。
+def camera_scale(t, dt=0.8):
+    def grab(tt):
+        r=subprocess.run(['ffmpeg','-v','error','-ss',str(tt),'-i',OUT,'-frames:v','1',
+            '-vf','crop=iw*0.73:ih*0.46:iw*0.14:ih*0.37,scale=350:125',
+            '-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
+        return r.stdout if len(r.stdout)==350*125 else None
+    a=grab(t); b=grab(t+dt)
+    if not a or not b: return None
+    W,H=350,125
+    best=(1.0,9e9)
+    for zi in range(-3,5):
+        z=1.0+zi*0.03
+        tot=0; cnt=0
+        for y in range(20,H-20,3):
+            for x in range(30,W-30,3):
+                sx=int((x-W/2)/z+W/2); sy=int((y-H/2)/z+H/2)
+                if 0<=sx<W and 0<=sy<H:
+                    tot+=abs(a[y*W+x]-b[sy*W+sx]); cnt+=1
+        d=tot/cnt if cnt else 9e9
+        if d<best[1]: best=(z,d)
+    return best[0]
+
+if DUR > LOOP0+2:
+    back=0; total=0
+    t=1.0
+    while t < LOOP0-1.5:
+        z=camera_scale(t)
+        if z is not None:
+            total+=1
+            if z > 1.01: back+=1
+        t += 2.0
+    if total >= 4:
+        pct = back*100//total
+        print(f'  カメラの後退: {total}箇所中{back}箇所 ({pct}%)', end='')
+        if pct >= 30:
+            print('  ← 後退してから前進しています')
+            ng.append('導入部でカメラが後退しています(%d%%の区間)' % pct)
+        else:
+            print('  問題なし')
+
+# 6. コマの複製(カクつき)
 def dup_rate(ss, dur=4):
     r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-t',str(dur),'-i',OUT,
         '-vf','scale=160:90','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
@@ -2839,7 +2889,7 @@ for label, ss in [('導入部', max(2, LOOP0*0.4)), ('ループ部', LOOP0+3)]:
             else:
                 print('  問題なし')
 
-# 6. 導入部とループの画質差
+# 7. 導入部とループの画質差
 def sharp(ss):
     r=subprocess.run(['ffmpeg','-v','error','-ss',str(ss),'-i',OUT,'-frames:v','1',
         '-vf','crop=1280:400:320:600,scale=640:200','-pix_fmt','gray','-f','rawvideo','-'],capture_output=True)
