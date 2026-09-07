@@ -2451,6 +2451,22 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 # 音の切り替わり(室内→屋外)はこの秒数に合わせる
 INTRO_EFFECTIVE=$(awk "BEGIN{v=$INTRO_DURATION - $INTRO_HEAD_CUT - $INTRO_TAIL_CUT; if(v<3) v=$INTRO_DURATION - $INTRO_HEAD_CUT; print v}")
 
+# ---- 終わりのフェードアウト ----
+#
+# 【なぜ必要か】
+# これまで音にフェードアウトがなく、-shortest で映像に合わせて
+# 切られるだけだった。曲の途中でぶつ切りになる。
+# 睡眠用に流し続ける動画なので、静かに消えて終わる形にする。
+#
+# 映像も同じ秒数で暗転させ、音が消えきると同時に真っ黒になるよう揃える。
+#
+#   3 … 通常の映像作品の長さ。この用途では急に感じる
+#   8 … 眠りを妨げない(現在)
+AUDIO_FADEOUT=8
+FADEOUT_START=$(awk -v t="$TOTAL_DURATION" -v f="$AUDIO_FADEOUT" 'BEGIN{v=t-f; if(v<1)v=0; printf "%.3f", v}')
+FADEOUT_AF="afade=t=out:st=${FADEOUT_START}:d=${AUDIO_FADEOUT}"
+echo "終わりのフェードアウト: ${FADEOUT_START}秒から${AUDIO_FADEOUT}秒かけて消えます"
+
 # 空だけを遅くする方式なので、導入部の長さは変わらない。
 # 音のタイミングもずれない。
 echo "音のタイミング基準: ${INTRO_EFFECTIVE}秒(指定${INTRO_DURATION}秒 − 冒頭${INTRO_HEAD_CUT}秒 − 末尾${INTRO_TAIL_CUT}秒)"
@@ -2620,7 +2636,7 @@ if [ "$HAS_AMBIENT" = true ]; then
   #   ミックス後に軽いコンプレッションをかけ、2つの音を同じダイナミクスにまとめる
   #   (別々に鳴っている感じを減らし、ひとつの音像として聴かせる)
   ffmpeg -y -i bgm_full.wav -i ambient_full.wav \
-    -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[mixed];[mixed]acompressor=threshold=0.15:ratio=3:attack=200:release=1000[aout]" \
+    -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[mixed];[mixed]acompressor=threshold=0.15:ratio=3:attack=200:release=1000,${FADEOUT_AF}[aout]" \
     -map "[aout]" -c:a aac -b:a 192k full_audio.aac
 
 else
@@ -2629,8 +2645,37 @@ else
 
   # BGM: ループして、窓へ向かうあたりからフェードイン
   ffmpeg -y -stream_loop -1 -i bgm.mp3 -t "$TOTAL_DURATION" \
-    -af "afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION}" \
+    -af "afade=t=in:st=${BGM_FADE_START}:d=${BGM_FADE_DURATION},${FADEOUT_AF}" \
     -c:a aac -b:a 192k full_audio.aac
+fi
+
+# ---- 終わりだけ暗転させる ----
+#
+# 【全長を再エンコードしない理由】
+# 1時間ぶんに fade をかけると再エンコードが1回まるごと増え、
+# 全体が1世代劣化する。暗転するのは最後の数秒だけなので、
+# そこだけ切り出して加工し、残りはコピーで繋ぐ。
+# 劣化するのは暗転区間だけで、そこは暗くなっていくので見えない。
+VDUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 full_video_noaudio.mp4)
+VFADE_FROM=$(awk -v d="$VDUR" -v f="${AUDIO_FADEOUT:-8}" 'BEGIN{v=d-f; if(v<1)v=0; printf "%.3f", v}')
+if awk -v v="$VFADE_FROM" 'BEGIN{exit !(v > 1)}'; then
+  echo "映像の終わり${AUDIO_FADEOUT}秒を暗転させます(全長は再エンコードしません)"
+  if ffmpeg -y -i full_video_noaudio.mp4 -t "$VFADE_FROM" -c copy -an fade_head.mp4 2>err_fadehead.log \
+     && ffmpeg -y -ss "$VFADE_FROM" -i full_video_noaudio.mp4 -an \
+        -vf "fade=t=out:st=0:d=${AUDIO_FADEOUT}" \
+        -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" \
+        fade_tail.mp4 2>err_fadetail.log; then
+    printf "file 'fade_head.mp4'\nfile 'fade_tail.mp4'\n" > fade_list.txt
+    if ffmpeg -y -f concat -safe 0 -i fade_list.txt -c copy fade_done.mp4 2>/dev/null; then
+      mv fade_done.mp4 full_video_noaudio.mp4
+      echo "  暗転を加えました"
+    else
+      echo "  結合に失敗したため、暗転なしで進みます"
+    fi
+  else
+    echo "  暗転の加工に失敗したため、そのまま進みます"
+    tail -3 err_fadetail.log 2>/dev/null || true
+  fi
 fi
 
 # ---- ⑦映像と音声を結合 ----
