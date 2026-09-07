@@ -1696,9 +1696,31 @@ INTRO_HANDOVER=0
 # 長くすると同じ絵が重なって一瞬止まって見えるので0.8秒。
 #
 #   0   … 溶かさない。1コマで飛ぶ
-#   0.8 … 差を紛らわせる(現在)
+#   0.8 … 差を紛らわせる
 #   2   … 長すぎ。同じ絵が重なって止まって見える
-XFADE_INTRO=0.8
+#
+# 【0にした理由 — 暗転で繋ぐ方式に変えた】
+# 導入部とループは別々に生成された別の映像で、湯気の量も雲の動きも違う。
+# 溶かして繋ぐには両者が十分似ている必要があるが、その前提が成り立たない。
+# 実際、重ねた区間だけ動きが二重に測定され、雲7.52 / 湯気10.54 と
+# 周囲の倍に跳ね上がっていた。
+#
+# 溶かすのをやめ、代わりに導入部の末尾を暗転させ、
+# ループの先頭を暗転から明けさせる。前後が直接重ならないので、
+# 似ている必要そのものがなくなる。
+XFADE_INTRO=0
+
+# 導入部の末尾とループの先頭を、黒へ落として黒から明ける秒数
+#
+# 【なぜ黒か】
+# 画面の明るさは終始60台の夜の情景なので、白(255)を挟むと
+# 睡眠用の動画として目に刺さる。夜の情景とも矛盾しない黒にする。
+# 動画の終わりも黒で締めるので、文法も揃う。
+#
+#   0   … 暗転しない(カットで直結)
+#   1.5 … 導入部が沈み、絶景が明ける(現在)
+#   3   … 間延びして見える
+INTRO_DIP=1.5
 
 # 導入部の冒頭から切り落とす秒数
 #
@@ -2327,6 +2349,34 @@ ffmpeg -y $INTRO_SS -i intro_video.mp4 $INTRO_CUT -an \
   -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_LIFT_VF}${INTRO_ZOOM_VF}${INTRO_FPS_VF}" \
   -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p intro_video_noaudio.mp4
 
+# ---- 導入部の末尾を暗転させる ----
+#
+# 加工するのは末尾の数秒だけ。手前はコピーで繋ぐので、
+# 導入部全体を再エンコードすることはない。
+if awk "BEGIN{exit !(${INTRO_DIP:-0} > 0.05)}"; then
+  IDIP_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video_noaudio.mp4)
+  IDIP_FROM=$(awk -v d="$IDIP_DUR" -v f="$INTRO_DIP" 'BEGIN{v=d-f; if(v<0.5)v=0; printf "%.3f", v}')
+  if awk -v v="$IDIP_FROM" 'BEGIN{exit !(v > 0.5)}'; then
+    echo "  導入部の末尾${INTRO_DIP}秒を暗転させます"
+    if ffmpeg -y -i intro_video_noaudio.mp4 -t "$IDIP_FROM" -c copy -an idip_head.mp4 2>err_idiphead.log \
+       && ffmpeg -y -ss "$IDIP_FROM" -i intro_video_noaudio.mp4 -an \
+          -vf "fade=t=out:st=0:d=${INTRO_DIP}" \
+          -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" \
+          idip_tail.mp4 2>err_idiptail.log; then
+      printf "file 'idip_head.mp4'\nfile 'idip_tail.mp4'\n" > idip_list.txt
+      if ffmpeg -y -f concat -safe 0 -i idip_list.txt -c copy idip_done.mp4 2>/dev/null; then
+        mv idip_done.mp4 intro_video_noaudio.mp4
+        echo "    暗転を加えました"
+      else
+        echo "    結合に失敗したため、暗転なしで進みます"
+      fi
+    else
+      echo "    暗転の加工に失敗したため、そのまま進みます"
+      tail -3 err_idiptail.log 2>/dev/null || true
+    fi
+  fi
+fi
+
 # ---- 切り替わり直前だけ、空と湯気をループの映像で置き換える ----
 #
 # 【何のためか】
@@ -2427,6 +2477,30 @@ MATCHPY
       echo "  置き換えに失敗したため、そのまま使います"
       tail -3 err_match.log 2>/dev/null || true
     fi
+  fi
+fi
+
+# ---- ループの先頭を暗転から明けさせる ----
+#
+# 導入部が黒へ沈んだあと、絶景が黒から浮かび上がる。
+# ここも先頭の数秒だけを加工し、残りはコピーで繋ぐ。
+if awk "BEGIN{exit !(${INTRO_DIP:-0} > 0.05)}"; then
+  echo "ループの先頭${INTRO_DIP}秒を暗転から明けさせます"
+  if ffmpeg -y -i loop_video.mp4 -t "$INTRO_DIP" -an \
+        -vf "fade=t=in:st=0:d=${INTRO_DIP}" \
+        -c:v libx264 -preset "$FINAL_PRESET" -crf "$FINAL_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" \
+        ldip_head.mp4 2>err_ldiphead.log \
+     && ffmpeg -y -ss "$INTRO_DIP" -i loop_video.mp4 -c copy -an ldip_body.mp4 2>err_ldipbody.log; then
+    printf "file 'ldip_head.mp4'\nfile 'ldip_body.mp4'\n" > ldip_list.txt
+    if ffmpeg -y -f concat -safe 0 -i ldip_list.txt -c copy ldip_done.mp4 2>/dev/null; then
+      mv ldip_done.mp4 loop_video.mp4
+      echo "  明けを加えました"
+    else
+      echo "  結合に失敗したため、明けなしで進みます"
+    fi
+  else
+    echo "  明けの加工に失敗したため、そのまま進みます"
+    tail -3 err_ldiphead.log 2>/dev/null || true
   fi
 fi
 
