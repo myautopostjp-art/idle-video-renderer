@@ -201,7 +201,19 @@ download_or_die_() {
   done
 }
 
-download_or_die_ "$INTRO_VIDEO_URL" intro_video.mp4 "導入動画"
+# ---- 導入部があるかどうか ----
+#
+# 導入部は7回引き直したが毎回別の破綻が出たため、
+# 外してループだけで作れるようにした。
+# GAS側の disableIntroVideo で外すと、ここに空文字が渡ってくる。
+HAS_INTRO=false
+if [ -n "$INTRO_VIDEO_URL" ] && [ "$INTRO_VIDEO_URL" != "none" ]; then
+  download_or_die_ "$INTRO_VIDEO_URL" intro_video.mp4 "導入動画"
+  HAS_INTRO=true
+else
+  echo "導入部なしで作ります(ループだけの動画になります)"
+  INTRO_DURATION=0
+fi
 download_or_die_ "$BGM_URL" bgm.mp3 "BGM"
 
 # 効果音のダウンロード(URLが指定されている場合のみ)
@@ -354,8 +366,10 @@ echo "出力フレームレート: ${OUTPUT_FPS}fps(素材に合わせていま�
 # 両者の縦横比が違うと、画面に収める際の拡大率が変わり、
 # 切り替わる瞬間に画が広がったように見えてしまう
 echo "--- 素材の解像度 ---"
-echo -n "  導入部: "
-ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 intro_video.mp4 || true
+if [ "$HAS_INTRO" = true ]; then
+  echo -n "  導入部: "
+  ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 intro_video.mp4 || true
+fi
 for ((i=0; i<CLIP_COUNT; i++)); do
   echo -n "  ループクリップ$((i+1)): "
   ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "stage_clip_raw_$i.mp4" || true
@@ -2203,6 +2217,15 @@ echo "ループ部分の結合が完了しました"
 #      連結した動画の途中で画角が変わってしまう。
 #      以前は導入部を -c:v copy でそのまま使っていたためこの問題が起きていた。
 #      ここでループ部分と同じ 1920x1080 / 30fps に揃えてから連結する。
+# ---- 導入部がないときは、このセクションを丸ごと飛ばす ----
+#
+# 以下は導入部の規格合わせ・暗転・連結の処理。
+# 導入部がなければ何もする必要がないので、ループをそのまま完成品にする。
+if [ "$HAS_INTRO" != true ]; then
+  echo "導入部がないので、ループだけで組み立てます"
+  cp loop_video.mp4 full_video_noaudio.mp4
+else
+
 echo "導入部をループ部分と同じ規格に揃えます..."
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate \
   -of default=nw=1 intro_video.mp4 || true
@@ -2508,6 +2531,9 @@ echo "file 'intro_video_noaudio.mp4'" > concat_full.txt
 echo "file 'loop_video.mp4'" >> concat_full.txt
 ffmpeg -y -f concat -safe 0 -i concat_full.txt -c copy full_video_noaudio.mp4
 
+fi
+# ---- 導入部セクション ここまで ----
+
 # 念のため、完成した映像の解像度が一貫しているか確認する
 echo "--- 完成した映像の情報 ---"
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,duration \
@@ -2524,6 +2550,14 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 # 冒頭カット後、実際に画面に出る導入部の長さ
 # 音の切り替わり(室内→屋外)はこの秒数に合わせる
 INTRO_EFFECTIVE=$(awk "BEGIN{v=$INTRO_DURATION - $INTRO_HEAD_CUT - $INTRO_TAIL_CUT; if(v<3) v=$INTRO_DURATION - $INTRO_HEAD_CUT; print v}")
+
+# 導入部がないときは0にする。
+# このあと OPEN_START と BGM_FADE_START をここから逆算しているため、
+# 負の値のままだと音の立ち上がりが壊れる。
+if [ "$HAS_INTRO" != true ]; then
+  INTRO_EFFECTIVE=0
+  echo "導入部がないので、音は頭から立ち上げます"
+fi
 
 # ---- 終わりのフェードアウト ----
 #
