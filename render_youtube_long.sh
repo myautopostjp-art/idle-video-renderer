@@ -1952,7 +1952,14 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p -r "$OUTPUT_FPS" -an "stage_headpart_$i.mp4"
 
     # 導入部の末尾を切り出して、ループの先頭と溶かし合わせる
-    INTRO_REAL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video.mp4)
+    #
+    # 導入部がないときは溶かす相手がいないので、長さを0として扱う。
+    # これにより下の分岐が「溶かさない」経路に入る。
+    if [ "$HAS_INTRO" = true ]; then
+      INTRO_REAL=$(ffprobe -v error -show_entries format=duration -of csv=p=0 intro_video.mp4)
+    else
+      INTRO_REAL=0
+    fi
     TAIL_FROM=$(awk "BEGIN{v=$INTRO_REAL - $XFADE_INTRO; if(v<0) v=0; print v}")
     # 冒頭カットぶんを差し引いた、実際に使う導入部の長さ
     INTRO_USED=$(awk "BEGIN{v=$INTRO_REAL - $INTRO_HEAD_CUT; if(v<1) v=$INTRO_REAL; print v}")
@@ -2034,7 +2041,7 @@ for ((i=0; i<CLIP_COUNT; i++)); do
       fi
       INTRO_TRIM=$(awk -v e="$INTRO_EFFECTIVE" -v h="$INTRO_HANDOVER" 'BEGIN{v=e-h; if(v<1) v=e; print v}')
       echo "  段階1: 導入部を${INTRO_TRIM}秒に切り詰め、ループの末尾を挟んで${XFADE_INTRO}秒かけて溶かします"
-    elif ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
+    elif [ "$HAS_INTRO" = true ] && ffmpeg -y -ss "$TAIL_FROM" -i intro_video.mp4 -t "$XFADE_INTRO" -an \
          -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,${INTRO_ZOOM_VF}fps=${OUTPUT_FPS}" \
          -c:v libx264 -preset "$CLIP_PRESET" -crf "$CLIP_CRF" $GOP_OPTS -pix_fmt yuv420p "intro_tail.mp4" 2>"err_introtail.log" \
        && ffmpeg -y -i "intro_tail.mp4" -i "head_blend_$i.mp4" \
