@@ -40,15 +40,60 @@ ls -la bg.jpg
 # 日本語対応フォント(事前にrender.yml側でfonts-noto-cjkをインストールしておくこと)
 FONT="/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
-# 暖色系の文字色(黒帯ボックスは廃止し、縁取りで視認性を確保)
-TEXT_COLOR="#FFE9B3"
+# 文字色
+#
+# 【白にした理由】
+# 以前は淡い黄(#FFE9B3)だったが、一覧に縮小されると背景の空や灯りに
+# 溶けて読めなかった。白に黒縁のほうが、どの絵の上でも判別できる。
+TEXT_COLOR="#FFFFFF"
 BORDER_COLOR="black"
 
-# 描画フィルタ:背景 → タイマー → 上部テキスト → 下部テキスト
+# タイマーの大きさ
+#
+# 140 から 110 に下げた。数字を大きく見せるより、
+# 背景の情景を主役にする方針。読みやすさは白+黒縁で確保する。
+TIMER_SIZE=110
+TIMER_BORDER=7
+
+# 画面に出す文字をタイマー(と無音表示)だけにするか
+#
+# 【1にした理由】
+# 上下に日本語の文字を焼き込んでいたが、焼き込んだ文字は翻訳されない。
+# 日本語が読めない視聴者には意味不明な文字が乗るだけになる。
+# 数字は世界共通なので、タイマーだけなら誰にでも通じる。
+# 説明文はTikTokが自動翻訳するので、伝えたいことはそちらに書く。
+#
+#   0 … 上下のテキストも出す(以前の動作)
+#   1 … タイマーだけにする(現在)
+TIMER_ONLY=1
+
+# 無音モードのときに出す表示
+#
+# 音が出ないことを意図的なものだと伝えないと、
+# 「壊れている」と思われて離脱される。
+# 日英併記にしてあるのは、焼き込んだ文字が翻訳されないため。
+#
+# 位置は、以前に上部テキストを置いていた2行分のすぐ下。
+SILENT_LABEL="無音 / Silent"
+SILENT_LABEL_SIZE=64
+SILENT_LABEL_Y=290
+
+# 描画フィルタ:背景 → タイマー → (無音表示) → (上下テキスト)
 VF="scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
-VF="$VF,drawtext=text='%{eif\:trunc((${DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=140:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:bordercolor=${BORDER_COLOR}:borderw=8"
-VF="$VF,drawtext=textfile=${TOP_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=64:x=(w-text_w)/2:y=120:bordercolor=${BORDER_COLOR}:borderw=5:line_spacing=10"
-VF="$VF,drawtext=textfile=${BOTTOM_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=42:x=(w-text_w)/2:y=h-280:bordercolor=${BORDER_COLOR}:borderw=4:line_spacing=8"
+
+# タイマー(位置は画面中央のまま)
+VF="$VF,drawtext=text='%{eif\:trunc((${DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=${TIMER_SIZE}:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:bordercolor=${BORDER_COLOR}:borderw=${TIMER_BORDER}"
+
+# 無音のときだけ「無音 / Silent」を出す
+if [ "$SILENT" = true ] && [ -n "${SILENT_LABEL}" ]; then
+  echo "無音表示を入れます: ${SILENT_LABEL} (y=${SILENT_LABEL_Y})"
+  VF="$VF,drawtext=text='${SILENT_LABEL}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=${SILENT_LABEL_SIZE}:x=(w-text_w)/2:y=${SILENT_LABEL_Y}:bordercolor=${BORDER_COLOR}:borderw=5"
+fi
+
+if [ "${TIMER_ONLY:-1}" != "1" ]; then
+  VF="$VF,drawtext=textfile=${TOP_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=64:x=(w-text_w)/2:y=120:bordercolor=${BORDER_COLOR}:borderw=5:line_spacing=10"
+  VF="$VF,drawtext=textfile=${BOTTOM_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=42:x=(w-text_w)/2:y=h-280:bordercolor=${BORDER_COLOR}:borderw=4:line_spacing=8"
+fi
 
 echo "=== レンダリング開始 (${DURATION}秒 = $((DURATION/60))分, 無音=${SILENT}) ==="
 
