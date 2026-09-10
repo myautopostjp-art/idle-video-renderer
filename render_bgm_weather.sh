@@ -75,8 +75,28 @@ if [ "$SYNTH_TYPE" != "none" ]; then
 fi
 
 FONT="/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-TEXT_COLOR="#FFE9B3"
+# タイマーの色
+#
+# 【白にした理由】
+# 以前は淡い黄(#FFE9B3)だったが、一覧に縮小されると背景の空や灯りに
+# 溶けて読めなかった。白に黒縁のほうが、どの絵の上でも判別できる。
+TEXT_COLOR="#FFFFFF"
 BORDER_COLOR="black"
+
+# 画面に出す文字をタイマーだけにするか
+#
+# 【1にした理由】
+# 上下に日本語の文字を焼き込んでいたが、焼き込んだ文字は翻訳されない。
+# 8か国(米・英・独・日・韓・仏・墨・伯)を対象にする以上、
+# 日本語が読めない視聴者には意味不明な文字が乗るだけになる。
+# 数字は世界共通なので、タイマーだけなら誰にでも通じる。
+#
+# 説明文はTikTokが自動翻訳するので、伝えたいことはそちらに書く。
+# 絵も隠れなくなる。
+#
+#   0 … 上下のテキストも出す(以前の動作)
+#   1 … タイマーだけにする(現在)
+TIMER_ONLY=1
 
 # 入力オプション組み立て(画像N枚 + BGM1つ + 雨オーバーレイ(あれば))
 INPUTS=()
@@ -173,9 +193,41 @@ if [ "$USE_SYNTH" = true ]; then
 fi
 
 # タイマー・テキストオーバーレイ(最終ノードに適用)
-FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=140:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:bordercolor=${BORDER_COLOR}:borderw=8[t1];"
-FILTER="${FILTER}[t1]drawtext=textfile=${TOP_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=64:x=(w-text_w)/2:y=120:bordercolor=${BORDER_COLOR}:borderw=5:line_spacing=10[t2];"
-FILTER="${FILTER}[t2]drawtext=textfile=${BOTTOM_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=42:x=(w-text_w)/2:y=h-280:bordercolor=${BORDER_COLOR}:borderw=4:line_spacing=8[vout]"
+#
+# タイマーの大きさ
+#
+# 一度190まで上げたが、絵を隠しすぎたので140に戻した。
+# 数字を大きく見せるより、背景の情景を主役にする方針。
+# 読みやすさは色を白にすることで確保する(淡い黄は縮小すると溶ける)。
+#
+#   110 … 控えめ。絵を最大限に見せる(現在)
+#   140 … 元の大きさ
+#   190 … 一覧でも確実に読めるが絵を隠す
+TIMER_SIZE=110
+TIMER_BORDER=7
+
+# タイマーの縦位置
+#
+# 以前は上部に2行のテキスト(y=120から、64px、行間10)を置いていた。
+#   1行目 120〜184 / 2行目 194〜258
+# その2行目のすぐ下にあたる位置にタイマーを置く。
+# 中央に置くと絵の主役部分に重なるため、上に寄せている。
+#
+#   120         … 元のテキスト1行目の位置
+#   290         … 2行目のすぐ下(現在)
+#   (h-text_h)/2 … 画面の中央
+TIMER_Y=290
+
+if [ "${TIMER_ONLY:-1}" = "1" ]; then
+  echo "画面の文字: タイマーのみ(サイズ${TIMER_SIZE})"
+  FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=${TIMER_SIZE}:x=(w-text_w)/2:y=${TIMER_Y}:font=monospace:bordercolor=${BORDER_COLOR}:borderw=${TIMER_BORDER}[vout]"
+else
+  # 上下テキストを出す場合、TIMER_Y だと上部テキストに重なるので中央に置く
+  echo "画面の文字: タイマー＋上下テキスト"
+  FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=${TIMER_SIZE}:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:bordercolor=${BORDER_COLOR}:borderw=${TIMER_BORDER}[t1];"
+  FILTER="${FILTER}[t1]drawtext=textfile=${TOP_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=64:x=(w-text_w)/2:y=120:bordercolor=${BORDER_COLOR}:borderw=5:line_spacing=10[t2];"
+  FILTER="${FILTER}[t2]drawtext=textfile=${BOTTOM_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=42:x=(w-text_w)/2:y=h-280:bordercolor=${BORDER_COLOR}:borderw=4:line_spacing=8[vout]"
+fi
 
 echo "=== レンダリング開始(天候変化${N}段階, 各源${STAGE_SRC_SEC}秒, 遷移${XFADE_SEC}秒) ==="
 
