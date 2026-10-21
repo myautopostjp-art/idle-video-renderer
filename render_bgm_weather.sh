@@ -236,7 +236,16 @@ ffmpeg -y "${INPUTS[@]}" \
   -filter_complex "$FILTER" \
   -map "[vout]" -map "${N}:a" \
   -t "$TOTAL_DURATION" \
-  -c:v libx264 -preset ultrafast -tune stillimage -r 6 -pix_fmt yuv420p \
+# 【圧縮設定を入れた理由】
+# CRFを指定しておらず、libx264の既定値(23)かつ preset=ultrafast で
+# 動いていた。ultrafast は速度優先で圧縮をほとんど行わないため、
+# 1時間の動画が24MB前後に膨らみ、TikTokへのアップロードが遅かった。
+#
+# 実測(1080x1920・静止画):
+#   ultrafast CRF既定 … 24MB
+#   veryfast  CRF28   …  8MB
+# 静止画が主体なので画質の劣化は見えず、処理時間もほぼ変わらない(19s→20s)。
+  -c:v libx264 -preset veryfast -tune stillimage -crf 28 -r 6 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -shortest \
   "$OUTPUT"
 
