@@ -221,13 +221,13 @@ TIMER_Y=290
 
 if [ "${TIMER_ONLY:-1}" = "1" ]; then
   echo "画面の文字: タイマーのみ(サイズ${TIMER_SIZE})"
-  FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=${TIMER_SIZE}:x=(w-text_w)/2:y=${TIMER_Y}:font=monospace:bordercolor=${BORDER_COLOR}:borderw=${TIMER_BORDER}[vout]"
+  FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR:-#FFE9B3}:fontsize=${TIMER_SIZE:-110}:x=(w-text_w)/2:y=${TIMER_Y:-290}:font=monospace:bordercolor=${BORDER_COLOR:-black}:borderw=${TIMER_BORDER:-7}[vout]"
 else
   # 上下テキストを出す場合、TIMER_Y だと上部テキストに重なるので中央に置く
   echo "画面の文字: タイマー＋上下テキスト"
-  FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=${TIMER_SIZE}:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:bordercolor=${BORDER_COLOR}:borderw=${TIMER_BORDER}[t1];"
-  FILTER="${FILTER}[t1]drawtext=textfile=${TOP_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=64:x=(w-text_w)/2:y=120:bordercolor=${BORDER_COLOR}:borderw=5:line_spacing=10[t2];"
-  FILTER="${FILTER}[t2]drawtext=textfile=${BOTTOM_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR}:fontsize=42:x=(w-text_w)/2:y=h-280:bordercolor=${BORDER_COLOR}:borderw=4:line_spacing=8[vout]"
+  FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR:-#FFE9B3}:fontsize=${TIMER_SIZE:-110}:x=(w-text_w)/2:y=(h-text_h)/2:font=monospace:bordercolor=${BORDER_COLOR:-black}:borderw=${TIMER_BORDER:-7}[t1];"
+  FILTER="${FILTER}[t1]drawtext=textfile=${TOP_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR:-#FFE9B3}:fontsize=64:x=(w-text_w)/2:y=120:bordercolor=${BORDER_COLOR:-black}:borderw=5:line_spacing=10[t2];"
+  FILTER="${FILTER}[t2]drawtext=textfile=${BOTTOM_TEXT_FILE}:fontfile=${FONT}:fontcolor=${TEXT_COLOR:-#FFE9B3}:fontsize=42:x=(w-text_w)/2:y=h-280:bordercolor=${BORDER_COLOR:-black}:borderw=4:line_spacing=8[vout]"
 fi
 
 echo "=== レンダリング開始(天候変化${N}段階, 各源${STAGE_SRC_SEC}秒, 遷移${XFADE_SEC}秒) ==="
