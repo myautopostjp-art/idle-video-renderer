@@ -41,7 +41,6 @@ ls -la bg.jpg
 FONT="/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
 # 文字色
-#
 # 【淡い黄のままにしている理由】
 # 一度白(#FFFFFF)にしたが、情景の暖色(行灯・暖炉・夕焼け)と馴染む
 # 淡い黄のほうが良いと判断して戻した。
@@ -50,30 +49,25 @@ TEXT_COLOR="#FFE9B3"
 BORDER_COLOR="black"
 
 # タイマーの大きさ
-#
 # 140 から 110 に下げた。数字を大きく見せるより、
 # 背景の情景を主役にする方針。読みやすさは白+黒縁で確保する。
 TIMER_SIZE=110
 TIMER_BORDER=7
 
 # 画面に出す文字をタイマー(と無音表示)だけにするか
-#
 # 【1にした理由】
 # 上下に日本語の文字を焼き込んでいたが、焼き込んだ文字は翻訳されない。
 # 日本語が読めない視聴者には意味不明な文字が乗るだけになる。
 # 数字は世界共通なので、タイマーだけなら誰にでも通じる。
 # 説明文はTikTokが自動翻訳するので、伝えたいことはそちらに書く。
-#
 #   0 … 上下のテキストも出す(以前の動作)
 #   1 … タイマーだけにする(現在)
 TIMER_ONLY=1
 
 # 無音モードのときに出す表示
-#
 # 音が出ないことを意図的なものだと伝えないと、
 # 「壊れている」と思われて離脱される。
 # 日英併記にしてあるのは、焼き込んだ文字が翻訳されないため。
-#
 # 位置は、以前に上部テキストを置いていた2行分のすぐ下。
 SILENT_LABEL="無音 / Silent"
 SILENT_LABEL_SIZE=64
@@ -103,15 +97,6 @@ if [ "$SILENT" = true ]; then
     -loop 1 -framerate 2 -i bg.jpg \
     -t "$DURATION" \
     -vf "$VF" \
-# 【圧縮設定を入れた理由】
-# CRFを指定しておらず、libx264の既定値(23)かつ preset=ultrafast で
-# 動いていた。ultrafast は速度優先で圧縮をほとんど行わないため、
-# 1時間の動画が24MB前後に膨らみ、TikTokへのアップロードが遅かった。
-#
-# 実測(1080x1920・静止画):
-#   ultrafast CRF既定 … 24MB
-#   veryfast  CRF28   …  8MB
-# 静止画が主体なので画質の劣化は見えず、処理時間もほぼ変わらない(19s→20s)。
     -c:v libx264 -preset veryfast -tune stillimage -crf 28 -r 2 -pix_fmt yuv420p \
     -an \
     "$OUTPUT"
