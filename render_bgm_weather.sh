@@ -219,14 +219,43 @@ TIMER_Y=290
 echo "画面の文字: タイマーのみ(サイズ${TIMER_SIZE})"
   FILTER="${FILTER}[${PREV}]drawtext=text='%{eif\:trunc((${TOTAL_DURATION}-t)/60)\:d\:2}\\:%{eif\:mod(trunc(${TOTAL_DURATION}-t)\,60)\:d\:2}':fontfile=${FONT}:fontcolor=${TEXT_COLOR:-#FFE9B3}:fontsize=${TIMER_SIZE:-110}:x=(w-text_w)/2:y=${TIMER_Y:-290}:font=monospace:bordercolor=${BORDER_COLOR:-black}:borderw=${TIMER_BORDER:-7}[vout]"
 
+# =====================================================
+# 圧縮設定(TikTokへのアップロードを軽くするため)
+# =====================================================
+# 【見直した理由】
+# 60分の動画なので、アップロードに時間がかかっていた。
+#
+# 音声: 128k → 96k
+#   60分だと音声だけで 128k=約58MB / 96k=約43MB。
+#   動画部分より音声のほうが重いことがあるので、ここが一番効く。
+#   静かな環境音楽なので、96kでも聞き分けはほぼつかない。
+#   (64k以下はシャリシャリした音の劣化が出やすいので下げない)
+#
+# 映像のCRF: 28 → 30
+#   数字が大きいほど軽く、粗くなる。動きの少ない情景なので
+#   30でも見た目はほぼ変わらない。TikTok側でも再圧縮される。
+#
+# プリセット: veryfast → medium
+#   同じ画質のまま、ファイルを2〜3割小さくできる。
+#   その分レンダリングは少し延びるが、重いのは合成処理のほうなので
+#   全体の所要時間への影響は小さい。
+#
+# faststart: 動画の目次をファイルの先頭に置く。
+#   読み込み開始が早くなり、アップロード後の処理も始まりやすい。
+VIDEO_CRF=30
+VIDEO_PRESET=medium
+AUDIO_BITRATE=96k
+
 echo "=== レンダリング開始(天候変化${N}段階, 各源${STAGE_SRC_SEC}秒, 遷移${XFADE_SEC}秒) ==="
+echo "圧縮設定: CRF ${VIDEO_CRF} / プリセット ${VIDEO_PRESET} / 音声 ${AUDIO_BITRATE}"
 
 ffmpeg -y "${INPUTS[@]}" \
   -filter_complex "$FILTER" \
   -map "[vout]" -map "${N}:a" \
   -t "$TOTAL_DURATION" \
-  -c:v libx264 -preset veryfast -tune stillimage -crf 28 -r 6 -pix_fmt yuv420p \
-  -c:a aac -b:a 128k -shortest \
+  -c:v libx264 -preset "$VIDEO_PRESET" -tune stillimage -crf "$VIDEO_CRF" -r 6 -pix_fmt yuv420p \
+  -c:a aac -b:a "$AUDIO_BITRATE" -shortest \
+  -movflags +faststart \
   "$OUTPUT"
 
 echo "=== 完成 ==="
