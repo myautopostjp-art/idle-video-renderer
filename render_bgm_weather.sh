@@ -242,19 +242,29 @@ echo "画面の文字: タイマーのみ(サイズ${TIMER_SIZE})"
 #
 # faststart: 動画の目次をファイルの先頭に置く。
 #   読み込み開始が早くなり、アップロード後の処理も始まりやすい。
+#
+# 音声をモノラルに(2回目の見直し)
+#   96kにしてもまだアップロードが遅かったので、左右2本の音を1本にまとめる。
+#   音声の重さは 96kステレオ=約43MB → 64kモノラル=約29MB。
+#   1本あたりに使える量はむしろ増える(48k → 64k)ので、音の粗さは出にくい。
+#   失うのは左右の広がりだけ。TikTokはスマホのスピーカーで聞かれることが
+#   ほとんどで、もともと左右の差はほぼ聞こえない。
+#     2 … ステレオ(以前)
+#     1 … モノラル(現在)
 VIDEO_CRF=30
 VIDEO_PRESET=medium
-AUDIO_BITRATE=96k
+AUDIO_BITRATE=64k
+AUDIO_CHANNELS=1
 
 echo "=== レンダリング開始(天候変化${N}段階, 各源${STAGE_SRC_SEC}秒, 遷移${XFADE_SEC}秒) ==="
-echo "圧縮設定: CRF ${VIDEO_CRF} / プリセット ${VIDEO_PRESET} / 音声 ${AUDIO_BITRATE}"
+echo "圧縮設定: CRF ${VIDEO_CRF} / プリセット ${VIDEO_PRESET} / 音声 ${AUDIO_BITRATE}・${AUDIO_CHANNELS}ch"
 
 ffmpeg -y "${INPUTS[@]}" \
   -filter_complex "$FILTER" \
   -map "[vout]" -map "${N}:a" \
   -t "$TOTAL_DURATION" \
   -c:v libx264 -preset "$VIDEO_PRESET" -tune stillimage -crf "$VIDEO_CRF" -r 6 -pix_fmt yuv420p \
-  -c:a aac -b:a "$AUDIO_BITRATE" -shortest \
+  -c:a aac -b:a "$AUDIO_BITRATE" -ac "$AUDIO_CHANNELS" -shortest \
   -movflags +faststart \
   "$OUTPUT"
 
