@@ -251,19 +251,30 @@ echo "画面の文字: タイマーのみ(サイズ${TIMER_SIZE})"
 #   ほとんどで、もともと左右の差はほぼ聞こえない。
 #     2 … ステレオ(以前)
 #     1 … モノラル(現在)
+#
+# キーフレームの間隔(3回目の見直し)
+#   実際のログで中身を量ったところ、映像50MBのうち約38MBが
+#   キーフレーム(画面を丸ごと保存するコマ)だった。
+#   標準設定では250コマごと(6fpsで約42秒ごと)に1枚入り、1枚が約440KBある。
+#   この動画はほとんど動かないので、キーフレームの間隔を5分に広げても見た目は変わらない。
+#   キーフレームは87枚 → 12枚になり、映像は約50MB → 約17MBになる見込み。
+#   (場面が大きく変わるところには、自動で追加のキーフレームが入る)
+#     250  … 約42秒ごと(標準)
+#     1800 … 5分ごと(現在。6fps × 300秒)
 VIDEO_CRF=30
 VIDEO_PRESET=medium
+VIDEO_KEYINT=1800
 AUDIO_BITRATE=64k
 AUDIO_CHANNELS=1
 
 echo "=== レンダリング開始(天候変化${N}段階, 各源${STAGE_SRC_SEC}秒, 遷移${XFADE_SEC}秒) ==="
-echo "圧縮設定: CRF ${VIDEO_CRF} / プリセット ${VIDEO_PRESET} / 音声 ${AUDIO_BITRATE}・${AUDIO_CHANNELS}ch"
+echo "圧縮設定: CRF ${VIDEO_CRF} / プリセット ${VIDEO_PRESET} / キーフレーム${VIDEO_KEYINT}コマごと / 音声 ${AUDIO_BITRATE}・${AUDIO_CHANNELS}ch"
 
 ffmpeg -y "${INPUTS[@]}" \
   -filter_complex "$FILTER" \
   -map "[vout]" -map "${N}:a" \
   -t "$TOTAL_DURATION" \
-  -c:v libx264 -preset "$VIDEO_PRESET" -tune stillimage -crf "$VIDEO_CRF" -r 6 -pix_fmt yuv420p \
+  -c:v libx264 -preset "$VIDEO_PRESET" -tune stillimage -crf "$VIDEO_CRF" -g "$VIDEO_KEYINT" -r 6 -pix_fmt yuv420p \
   -c:a aac -b:a "$AUDIO_BITRATE" -ac "$AUDIO_CHANNELS" -shortest \
   -movflags +faststart \
   "$OUTPUT"
